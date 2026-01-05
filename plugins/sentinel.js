@@ -122,7 +122,6 @@ module.exports = {
 
 		} catch (ConnectionMismatchException e) {
 			Bukkit.getLogger().severe("This license is not connected to the jar.");
-			Bukkit.getPluginManager().disablePlugin(wTags.getInstance());
 			return false;
 		}
 	}
