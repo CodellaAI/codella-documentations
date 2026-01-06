@@ -11,9 +11,9 @@ module.exports = {
         </repositories>
         <dependencies>
             <dependency>
-                <groupId>dev.yguard</groupId>
+                <groupId>com.yworks</groupId>
                 <artifactId>yguard</artifactId>
-                <version>2.0.0</version>
+                <version>4.1.1</version>
                 <scope>compile</scope>
             </dependency>
         </dependencies>
