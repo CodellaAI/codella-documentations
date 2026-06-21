@@ -587,7 +587,7 @@ module.exports = {
         void setEquipment(EntityEquipmentSlot slot, ItemStack item)
         void playAnimation(EntityAnimation animation)
         void setSlimeSize(int size); void setSmall(); void setInvisible()
-        void setDisplayName(String name); void setGlowing(EdColor color); float getNameHeight()
+        void setDisplayName(String name); void setGlowing(EdColor color) /* 16 vanilla chat colours only — see GLOWING WARNING */; float getNameHeight()
         Vector getPosition()
         void tp(double x, double y, double z); void shortTp(double x, double y, double z) // shortTp = move packet-entities inside goals
         void rotateBodyAndMove(double x, double y, double z, float yaw, float pitch)
@@ -616,7 +616,7 @@ module.exports = {
         String getId(); Float getMaxHeight(); EdModelEntity createEntity(Location location)
         EdModelEntity interface: EdEntity getInteractionEntity()/getMainEntity()/getDisplayName();
         Map<String,EdEntity> getPassengers(); EdModel getModel(); void setYaw(float)/setPitch(float)/rotate(float,float);
-        void spawn(); void setGlowing(EdColor); void addWatcher(Player); void remove();
+        void spawn(); void setGlowing(EdColor) /* 16 vanilla chat colours only — see GLOWING WARNING */; void addWatcher(Player); void remove();
         void playAnimation(String)/playLoopAnimation(String)/stopAnimation(); boolean isPlayingAnimation(); String getCurrentAnimation()
 
         Goal System (es.edwardbelt.edlib.iapi.entity.goal) — drive packet-entity movement
@@ -649,6 +649,14 @@ module.exports = {
         EdColor (es.edwardbelt.edlib.iapi): BLACK, DARK_BLUE, DARK_GREEN, DARK_AQUA, DARK_RED, DARK_PURPLE,
           GOLD, GRAY, DARK_GRAY, BLUE, GREEN, AQUA, RED, LIGHT_PURPLE, YELLOW, WHITE, ORANGE, MAGENTA,
           LIGHT_BLUE, LIME, PINK, LIGHT_GRAY, CYAN, PURPLE, BROWN  (String getName())
+          !!! GLOWING WARNING: setGlowing(EdColor) colours the entity via a scoreboard TEAM, whose
+          colour MUST be one of the 16 vanilla chat colours. ONLY these 16 are valid for setGlowing:
+          BLACK, DARK_BLUE, DARK_GREEN, DARK_AQUA, DARK_RED, DARK_PURPLE, GOLD, GRAY, DARK_GRAY, BLUE,
+          GREEN, AQUA, RED, LIGHT_PURPLE, YELLOW, WHITE.
+          The other 9 (ORANGE, MAGENTA, LIGHT_BLUE, LIME, PINK, LIGHT_GRAY, CYAN, PURPLE, BROWN) are
+          dye/extended colours that are NOT valid team colours — passing one to setGlowing throws a
+          ClientboundSetPlayerTeamPacket NullPointerException during packet encode and DISCONNECTS the
+          player ("Cannot invoke Enum.ordinal() because instance is null"). Never use them for glow.
         EntityAnimation (es.edwardbelt.edlib.iapi.entity): SWING_MAIN_HAND(0), SWING_OFF_HAND(3), LEAVE_BED(1), CRITICAL_EFFECT(4), MAGIC_CRITICAL_EFFECT(5)
         EntityEquipmentSlot (es.edwardbelt.edlib.iapi.entity): MAIN_HAND(0), OFF_HAND(1), BOOTS(2), LEGGINGS(3), CHESTPLATE(4), HELMET(5), BODY(6), SADDLE(7)
 
@@ -677,6 +685,17 @@ module.exports = {
         - ALWAYS give the enchant a configurable proc-message in its yaml and send it with
           enchants.sendProcMessage(player, id, "{token}", value, ...) — it already respects the
           player's mute toggles, colours and PlaceholderAPI. Don't build chat by hand.
+        - GLOWING: only call setGlowing(EdColor) with one of the 16 vanilla chat colours (BLACK,
+          DARK_BLUE, DARK_GREEN, DARK_AQUA, DARK_RED, DARK_PURPLE, GOLD, GRAY, DARK_GRAY, BLUE, GREEN,
+          AQUA, RED, LIGHT_PURPLE, YELLOW, WHITE). The extended EdColor values (ORANGE, MAGENTA,
+          LIGHT_BLUE, LIME, PINK, LIGHT_GRAY, CYAN, PURPLE, BROWN) CRASH the player's connection with a
+          ClientboundSetPlayerTeamPacket NPE. When in doubt, pick a standard colour like AQUA or RED.
+        - SPAWN THREAD: every EdLib packet entity can be created and spawned ASYNCHRONOUSLY (in
+          asyncSafe onProc, goal runnables or executor.async) — falling blocks, armor stands, slimes,
+          zombies, displays, NPCs, TNT, etc. The ONLY exception is the ENDER DRAGON: it must be created
+          and spawned on the MAIN thread. If you spawn an Ender Dragon, do the createEntity + spawnInMine
+          inside EdLibAPI.getExecutor().sync(...), then animate/move it off-thread as usual. Everything
+          else stays fully async.
 
         ============================================================================
         HOW TO ADD THE ENCHANT (tell the user this AFTER you write the Java)
