@@ -220,7 +220,8 @@ module.exports = {
         boolean isEnabled()
         double getEconomyBoost(UUID playerId, String economy)         // 0 = none
         double getEnchantBoost(UUID playerId)
-        void giveBooster(UUID playerId, String economy, double multiplier, boolean enchantBooster, long durationSeconds)
+        void giveBooster(UUID playerId, String economy, double multiplier, boolean enchantBooster, long durationSeconds) // default name "API Booster"
+        void giveBooster(UUID playerId, String name, String economy, double multiplier, boolean enchantBooster, long durationSeconds) // custom display name (shown in menu/boss bar)
         void removeBooster(UUID playerId, String boosterId)
         void addGlobalBooster(String economy, double multiplier, boolean enchantBooster, long durationSeconds) // 0s = permanent
         boolean isBoosterItem(ItemStack item)
@@ -588,6 +589,8 @@ module.exports = {
         void playAnimation(EntityAnimation animation)
         void setSlimeSize(int size); void setSmall(); void setInvisible()
         void setDisplayName(String name); void setGlowing(EdColor color) /* 16 vanilla chat colours only — see GLOWING WARNING */; float getNameHeight()
+        void setText(List<String> lines)            // text-display only: update lines in place (no flicker)
+        void setBillboard(BillboardMode mode)       // display entities (text/block/item): rotation constraint — call before spawn(); default CENTER (faces player)
         Vector getPosition()
         void tp(double x, double y, double z); void shortTp(double x, double y, double z) // shortTp = move packet-entities inside goals
         void rotateBodyAndMove(double x, double y, double z, float yaw, float pitch)
@@ -657,6 +660,7 @@ module.exports = {
           dye/extended colours that are NOT valid team colours — passing one to setGlowing throws a
           ClientboundSetPlayerTeamPacket NullPointerException during packet encode and DISCONNECTS the
           player ("Cannot invoke Enum.ordinal() because instance is null"). Never use them for glow.
+        BillboardMode (es.edwardbelt.edlib.iapi.entity): FIXED, VERTICAL, HORIZONTAL, CENTER — for entity.setBillboard(...) on display entities. CENTER = always faces the player (hologram look); FIXED = static.
         EntityAnimation (es.edwardbelt.edlib.iapi.entity): SWING_MAIN_HAND(0), SWING_OFF_HAND(3), LEAVE_BED(1), CRITICAL_EFFECT(4), MAGIC_CRITICAL_EFFECT(5)
         EntityEquipmentSlot (es.edwardbelt.edlib.iapi.entity): MAIN_HAND(0), OFF_HAND(1), BOOTS(2), LEGGINGS(3), CHESTPLATE(4), HELMET(5), BODY(6), SADDLE(7)
 
