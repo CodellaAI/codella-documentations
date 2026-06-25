@@ -220,8 +220,8 @@ module.exports = {
         boolean isEnabled()
         double getEconomyBoost(UUID playerId, String economy)         // 0 = none
         double getEnchantBoost(UUID playerId)
-        void giveBooster(UUID playerId, String economy, double multiplier, boolean enchantBooster, long durationSeconds) // default name "API Booster"
-        void giveBooster(UUID playerId, String name, String economy, double multiplier, boolean enchantBooster, long durationSeconds) // custom display name (shown in menu/boss bar)
+        void giveBooster(UUID playerId, String id, String economy, double multiplier, boolean enchantBooster, long durationSeconds) // default name "API Booster"; id is what removeBooster expects
+        void giveBooster(UUID playerId, String id, String name, String economy, double multiplier, boolean enchantBooster, long durationSeconds) // custom display name (shown in menu/boss bar); id is what removeBooster expects
         void removeBooster(UUID playerId, String boosterId)
         void addGlobalBooster(String economy, double multiplier, boolean enchantBooster, long durationSeconds) // 0s = permanent
         boolean isBoosterItem(ItemStack item)
