@@ -1,6 +1,6 @@
 module.exports = {
     name: 'PinnaPrison',
-    description: 'API to access PinnaPrison features: packet-based private mines, pickaxe enchants (custom API enchants), currencies, levelings, rebirth, backpacks, autosell, boosters, crystals, abilities, attributes, autominers, bombs, drills and GUIs — plus the low-level EdLib API for packet-based fake entities, custom models and goal-based AI used to build crazy animated mine enchants.',
+    description: 'API to access PinnaPrison features: packet-based private mines, pickaxe enchants (custom API enchants), currencies (incl. external-plugin currencies), levelings, rebirth, backpacks, autosell, boosters (incl. live boost providers), crystals, abilities, attributes, autominers, bombs, drills, gangs, pickaxe skins, custom mine placeables, config-driven GUIs, action-bar control, number formatting and offline player data — plus the low-level EdLib API for packet-based fake entities, display styling, mob variants, custom models, packet worlds and goal-based AI used to build crazy animated mine enchants.',
     pluginId: 'PinnaPrison',
     systemDownloadURL: `
         https://raw.githubusercontent.com/CodellaAI/codella-documentations/main/lib/PinnaPrison-API.jar
@@ -40,18 +40,23 @@ module.exports = {
          *
          * EdLib-API.jar (es.edwardbelt.edlib.iapi):
          * - Low-level, packet-based server functionality (no real entities/blocks)
-         * - Fake entity creation + manipulation (EdEntity), block/item displays, models
+         * - Fake entity creation + manipulation (EdEntity), block/item/text displays
+         *   (full display styling: background, shadows, line width, teleport interpolation),
+         *   mob variants, custom models with animations + smooth movement
          * - Goal-based AI for entity movement (EdGoal + impl goals)
-         * - Action bars, XP bars, boss bars, per-player block packets
+         * - Action bars, XP bars, boss bars, per-player block packets, packet worlds (EdWorld)
          * - Cross-version (1.20.3 -> 1.26) NMS abstraction
          * - Everything in EdLib runs fine asynchronously (it is all packets)
          *
          * PinnaPrison-API.jar (es.edwardbelt.pinnaprison.iapi):
          * - High-level prison integration: mines, enchants, currencies, levelings,
          *   rebirth, backpacks, autosell, boosters, crystals, abilities, attributes,
-         *   autominers, bombs, drills, pickaxe and GUIs
+         *   autominers, bombs, drills, gangs, pickaxe + pickaxe skins and GUIs
          * - Register custom pickaxe (mine) enchants with full proc/animation behaviour
          * - Break + reward blocks exactly like vanilla mining
+         * - Bridge external economies in, register live boost providers, custom mine
+         *   placeables and custom GUI item types, control the action bar, format
+         *   numbers like the server, and read/edit OFFLINE players' data
          */
 
         plugin.yml: add only PinnaPrison as a 'depend' (EdLib's API ships inside the PinnaPrison jar):
@@ -88,6 +93,13 @@ module.exports = {
         SellService getSell()
         BombService getBombs()
         DrillService getDrills()
+        GangService getGangs()
+        PickaxeSkinService getPickaxeSkins()
+        PlayerDataService getPlayers()      // offline-capable raw data access
+        PlaceableService getPlaceables()    // custom mine placeable types
+        DisplayService getDisplay()         // action-bar control
+        FormatService getFormat()           // format.yml number formatting/parsing
+        GuiService getGuis()                // config-driven GUIs (iapi.gui package)
 
         Example:
         \`\`\`java
@@ -113,6 +125,17 @@ module.exports = {
         void addBalanceBoosted(UUID playerId, String currencyId, BigDecimal amount) // applies booster/crystal/attribute/rebirth multipliers — use this for enchant rewards
         BigDecimal getBoostMultiplier(UUID playerId, String currencyId)
         boolean has(UUID playerId, String currencyId, BigDecimal amount)
+        void registerExternalCurrency(ExternalCurrency currency) // bridge another plugin's economy in
+        boolean isExternal(String currencyId)
+        ExternalCurrency (es.edwardbelt.pinnaprison.iapi.currency) — implement + register and its id works
+        anywhere a currency id is used (enchant costs, autosell rewards, leveling costs, ...). PinnaPrison
+        never stores the balance; every call delegates to your plugin. Display name/colour come from
+        external-currencies.yml (matched by id). Must be THREAD-SAFE (called from Netty mining threads):
+          String getId()                                        // e.g. "rivalcredits"
+          BigDecimal getBalance(UUID playerId)
+          void setBalance(UUID playerId, BigDecimal amount)
+          void addBalance(UUID playerId, BigDecimal amount)
+          void removeBalance(UUID playerId, BigDecimal amount)
 
         EnchantService: (see the ENCHANT SYSTEM section for registerEnchant + onProc)
         void registerEnchant(String enchantId, APIEnchant enchant)
@@ -188,6 +211,16 @@ module.exports = {
         int breakLayer(Player player, int y, boolean affectBlockCurrencies, boolean affectAutosell, boolean affectTokenGreed)
         int breakSphere(Player player, Vector center, double radius, boolean affectBlockCurrencies, boolean affectAutosell, boolean affectTokenGreed)
         boolean breakBlock(Player player, Vector position, boolean affectBlockCurrencies, boolean affectAutosell, boolean affectTokenGreed, boolean affectEnchants) // affectEnchants=true can chain-proc; use carefully
+        // The ...InOwnMine / mine-query methods below act on the player's OWNED mine even while they
+        // stand elsewhere (autominer-style features); the methods above act on the mine the player is
+        // standing in. All thread-safe.
+        Material getBlockInOwnMine(Player owner, Vector position) // AIR if mined, null if out of bounds / no mine
+        List<Vector> findBlocksNear(Player owner, Vector center, double radius, int limit) // up to limit random unbroken blocks in range (how built-in autominers pick targets); lock-free
+        Vector findTopBlock(Player owner)                       // random unbroken block on the highest non-empty layer, or null
+        int highestBlockY(Player owner, int x, int z)           // highest non-air Y in that column, Integer.MIN_VALUE if empty/out of bounds
+        int getNonAirBlocks(Player owner)                       // unbroken blocks left (0 if unowned)
+        int getTotalBlocks(Player owner)                        // total capacity broken+unbroken (0 if unowned)
+        int breakBlocksInOwnMine(Player owner, Collection<Vector> positions, boolean affectBlockCurrencies, boolean affectAutosell, boolean affectTokenGreed) // breaks in the OWNED mine even while the owner roams; shows damage to viewers + checks reset threshold. All three flags false = raw break, pay through SellService#sell yourself (what built-in autominers do)
         Collection<Player> getMineViewers(Player player)        // digger + co-op members + visitors — target packet FX at all of them
         void spawnInMine(Player player, EdEntity entity)        // show a packet entity to the WHOLE mine (use instead of addWatcher+spawn)
         void despawnInMine(Player player, EdEntity entity)      // untrack + despawn (use instead of EdEntity#remove)
@@ -224,6 +257,17 @@ module.exports = {
         void giveBooster(UUID playerId, String id, String name, String economy, double multiplier, boolean enchantBooster, long durationSeconds) // custom display name (shown in menu/boss bar); id is what removeBooster expects
         void removeBooster(UUID playerId, String boosterId)
         void addGlobalBooster(String economy, double multiplier, boolean enchantBooster, long durationSeconds) // 0s = permanent
+        void registerBoostProvider(String id, BoostProvider provider) // live computed boosts, never persisted — gone the moment you unregister or return 0
+        void unregisterBoostProvider(String id)
+        BoostProvider (es.edwardbelt.pinnaprison.iapi.booster) — conditional bonuses ("while holding a
+        streak", "while an event runs"). Stacks with regular boosters per boosters.yml. Queried on EVERY
+        boosted income + proc-chance lookup (hot async mining path): must be FAST (cached map lookups, no
+        I/O) and thread-safe. All methods default:
+          double getEconomyBoost(UUID playerId, String economy)  // extra above 1x, 0 = none; currency id = income, enchant id = that enchant's proc chance
+          double getEnchantBoost(UUID playerId)                  // extra above 1x on every enchant's proc chance
+          Collection<ProviderBoost> getBoostViews(UUID playerId, String economy) // display-only entries for the boosters GUI / %pinnaprison_boosters_names_<economy>%; empty = invisible (boost still applies)
+          Collection<ProviderBoost> getEnchantBoostViews(UUID playerId)
+        ProviderBoost record: (String displayName, double displayMultiplier) // +50% passes 1.5 (renders "1.5x")
         boolean isBoosterItem(ItemStack item)
         String getBoosterId(ItemStack item)
         ItemStack createBoosterItem(String id)
@@ -301,6 +345,135 @@ module.exports = {
         ItemStack createDrillItem(String id)
         void useDrill(Player player, ItemStack drillItem)
 
+        GangService: (gang lookup + full lifecycle. Mutators bypass the /gang command's player-facing
+        checks — create requirements, permissions, invites — and fire the matching gang events)
+        Optional<GangView> getGang(UUID gangId)
+        Optional<GangView> getGangByName(String name)
+        Optional<GangView> getPlayerGang(UUID playerId)
+        boolean hasGang(UUID playerId)
+        List<GangView> getAllGangs()
+        List<GangView> getTopGangs()                            // ranked by gang level, same order as /gang top
+        int getRank(UUID gangId)                                // 1-based leaderboard rank, -1 if unranked
+        boolean gangNameExists(String name)
+        Optional<GangView> createGang(UUID leaderId, String leaderName, String name) // empty if already in a gang / name taken / cancelled
+        boolean disbandGang(UUID gangId)
+        boolean addMember(UUID gangId, UUID playerId, String playerName)
+        boolean removeMember(UUID gangId, UUID playerId)
+        boolean transferLeader(UUID gangId, UUID newLeaderId)
+        boolean setDescription(UUID gangId, String description)
+        BigDecimal getPoints(UUID gangId)
+        void addPoints(UUID gangId, BigDecimal amount)
+        boolean removePoints(UUID gangId, BigDecimal amount)
+        BigDecimal addExperience(UUID gangId, BigDecimal amount) // handles level-ups; returns the new level
+        Set<String> getUpgradeIds()
+        int getUpgradeLevel(UUID gangId, String upgradeId)
+        boolean setUpgradeLevel(UUID gangId, String upgradeId, int level) // forces, ignoring point cost
+        double getGangMultiplier(UUID playerId, String currencyId) // combined gang-upgrade income bonus above 1.0 (0 = no gang / no upgrade)
+        int getMaxMembers()
+        GangView (es.edwardbelt.pinnaprison.iapi.gang) — read-only LIVE view; mutate through the service:
+          UUID getId(); String getName(); String getDescription(); UUID getLeader();
+          Set<UUID> getMemberIds() (includes leader); int getMemberCount(); BigDecimal getLevel();
+          BigDecimal getExperience(); BigDecimal getPoints(); int getUpgradeLevel(String upgradeId);
+          boolean isMember(UUID playerId); boolean isLeader(UUID playerId)
+
+        PickaxeSkinService: (configured skins pickaxe/skins/*.yml + per-player owned/selected — build your
+        own unlock mechanics on top of the built-in visuals)
+        List<String> getSkinIds()                               // config order; first = free default
+        PickaxeSkinInfo getSkin(String skinId)                  // null if unknown; snapshot — refetch after reload
+        String getDefaultSkinId()
+        String getSelectedSkinId(UUID playerId)                 // falls back to the default skin id
+        List<String> getOwnedSkinIds(UUID playerId)
+        boolean isSkinOwned(UUID playerId, String skinId)       // default skin always owned
+        boolean grantSkin(UUID playerId, String skinId)         // free grant, ignores sequential unlock order; thread-safe; does NOT equip
+        boolean revokeSkin(UUID playerId, String skinId)        // default skin can't be revoked; if equipped, selection resets
+        void selectSkin(Player player, String skinId)           // equips: persists + rebuilds the pickaxe + plays equip sound. MAIN THREAD only
+        Reads + grant/revoke are thread-safe (fine inside async BlockMineEvent listeners).
+        PickaxeSkinInfo (es.edwardbelt.pinnaprison.iapi.data): String getId()/getName()/getPrimaryColor()/
+          getSecondaryColor()/getMaterial(); int getModelData() (-1 = none); double getMultiplier() (extra
+          blocks per mined block, 0.4 = +40%, stacks with backpack multiplier); String getCostCurrency()
+          (null = no built-in cost); BigDecimal getCostAmount()
+        To intercept the built-in money purchase (pickaxe-skins GUI) listen to PickaxeSkinPurchaseEvent.
+
+        PlayerDataService: (read/edit ANY player's stored data — OFFLINE included; built for web panels/bots)
+        PlayerData getData(UUID playerId)                       // null if not in memory — ensureLoaded first for offline players
+        boolean hasData(UUID playerId)                          // in memory OR on disk/database
+        boolean isLoaded(UUID playerId)
+        boolean ensureLoaded(UUID playerId)                     // loads offline data into memory; may block — OFF the main thread
+        UUID getCurrentMineOwner(UUID onlinePlayerId)           // owner of the mine the ONLINE player stands in, or null. Main thread
+        boolean editEconomy(UUID playerId, String kind, String dataId, String op, BigDecimal amount)
+          // kind: "currency"|"leveling"|"enchant"; op: "set"|"add"|"remove". RAW admin override: no events,
+          // no boosts, works online or offline, persists async. false only if the player never joined. Off main thread
+        Collection<PlayerData> getAllData()                     // every stored player incl. offline (leaderboards/exports). HEAVY — off main thread + cache. Empty when backend can't enumerate (Mongo)
+        PlayerData (es.edwardbelt.pinnaprison.iapi.data) — read view; maps hold STORED entries only (absent
+        id = default/zero): UUID getUniqueId(); BigDecimal getRawBlocksBroken() (lifetime hand-mined);
+          Map<String,BigDecimal> getCurrencies()/getLevelings()/getEnchants();
+          Map<String,Integer> getEnchantPrestiges() (may be null on old saves); String getMineType()/getMineTier();
+          int getMineExpansions(); double getMineTax() (0-100); boolean isMineOpen()
+
+        PlaceableService: (register custom mine placeable types — packet-based decorations/interactables
+        configured per mine type under placeables: in privatemines/mines/<type>.yml; the section's type:
+        key picks the implementation. Built-ins: hologram, entity, afk-block. Register in onEnable —
+        mines load per player join, after all plugins enabled)
+        void registerPlaceableType(String typeId, PlaceableFactory factory) // re-registering replaces (built-ins included)
+        boolean isPlaceableTypeRegistered(String typeId)
+        void registerClickable(int entityId, PlaceableClickHandler handler) // route clicks on a packet entity by edEntity.getId(); ids are server-global
+        void unregisterClickable(int entityId)                  // ALWAYS call from APIPlaceable#destroy()
+        PlaceableFactory (es.edwardbelt.pinnaprison.iapi.placeable, functional):
+          APIPlaceable create(Player mineOwner, ConfigurationSection section) // once per loaded mine, possibly async; section = the placeable's yml entry (type + your keys: position, model ids, ...); null/throw = skip (logged)
+        APIPlaceable — one instance per loaded mine; packet-based, so show/hide is per watcher. All three
+        may run OFF the main thread (EdLib packet ops are safe there, Bukkit API is not):
+          void place(Player watcher)   // show to a viewer (called for existing + future mine viewers) — typically entity.addWatcher(watcher)
+          void unplace(Player watcher) // hide from a viewer who left
+          default void destroy()       // release packet entities + unregister clickables (mine reload/teardown)
+        PlaceableClickHandler (functional): void onClick(Player player, PlaceableClickType clickType)
+          // Netty thread, vanilla double-fire already de-duplicated; schedule a sync task before Bukkit API
+        PlaceableClickType enum: LEFT, RIGHT
+
+        DisplayService: (PinnaPrison refreshes a persistent leveling action bar every couple of ticks, so
+        action-bar text you send yourself is overwritten almost immediately — route it through this instead)
+        void showActionbar(Player player, String text, long durationTicks) // one-shot message, suppresses the bar + overrides for that window; colors translated; any thread
+        void registerActionbarOverride(String id, Function<Player, String> provider)
+          // persistent override: while provider returns non-null for a player, its text replaces the leveling
+          // bar, refreshed by PinnaPrison's own loop (no flicker). Provider runs ASYNC every few ticks for
+          // EVERY online player — must be thread-safe + cheap: return a cached, pre-formatted string (legacy
+          // color codes, hex already translated). Return null to fall through. Same id re-register replaces;
+          // first registered provider returning non-null wins. Temporary showActionbar messages win over overrides
+        void unregisterActionbarOverride(String id)
+        String id = your plugin name.
+
+        FormatService: (format/parse numbers with the server's format.yml notation so addon output matches
+        PinnaPrison's own lore/placeholders/menus. Suffixes config-driven: k, M, B, T, Qa, Qi, S, Sp, O, N,
+        D, ... up to 10^102. All thread-safe)
+        String format(BigDecimal number)                        // server default notation (abbreviated or pretty)
+        String formatAbbreviated(BigDecimal number)             // 100000 -> "100k", 2.5B, 100D
+        String formatGrouped(BigDecimal number)                 // 100000 -> "100,000"
+        BigDecimal parse(String input)                          // "100M" / "2.5B" / "1,000" / scientific -> number; null if invalid. Case-insensitive, inverse of formatAbbreviated
+
+        GuiService (es.edwardbelt.pinnaprison.iapi.gui): (PinnaPrison's config-driven GUI system guis/*.yml —
+        register your own custom-item types and reference them from any GUI config like the built-ins)
+        void registerItemType(String typeId, ApiGuiItemFactory factory) // typeId = the custom-item.type value; built-in ids win on collision; re-register replaces
+        void unregisterItemType(String typeId)
+        boolean guiExists(String guiId)                         // guis/<id>.yml loaded?
+        void openGui(Player player, String guiId)               // main-thread hop included
+        void openGui(Player player, String guiId, Map<String, String> placeholders) // extra {token} replacements for every item
+        void refreshOpenGui(Player player)                      // fully re-render the open PinnaPrison GUI (after your item changed state)
+        String getOpenGuiId(Player player)                      // null if none
+        ApiGuiItemFactory (functional): ApiGuiItem create(ApiGuiItemContext context) // main thread, once per configured slot per render — keep cheap
+        ApiGuiItem — controls one slot (all callbacks main thread):
+          ItemStack render()                                    // null hides the entry (filler shows)
+          default void onClick(ApiGuiClick click)               // click itself always cancelled; mutate inventory/cursor NEXT tick
+          default boolean allowsCursorInteraction()             // true = viewer can pick/place in their OWN inventory (drag-and-drop slots; read cursor via click.getCursor()); top window stays protected
+          default boolean shouldShow()                          // false hides (on top of the config requirement)
+        ApiGuiItemContext: Player getPlayer(); Map<String,String> getPlaceholders() (live {token} map);
+          ConfigurationSection getCustomItemSection();
+          ItemStack renderConfiguredItem(Map<String,String> extraPlaceholders)  // renders the yml entry's own item (material/texture-heads, name, lore, model-data, glow, {token} + PAPI + hex)
+          ItemStack renderItemSection(ConfigurationSection itemSection, Map<String,String> extraPlaceholders) // render any section in PinnaPrison's item format (e.g. a locked-item: sub-section); null if no material
+        ApiGuiClick: Player getPlayer(); ClickType getClickType(); int getSlot(); ItemStack getCursor() (snapshot, null/AIR = empty); ItemStack getClickedItem()
+        Reference from a gui yml entry:
+          my-slot-1:
+            custom-item: { type: 'my-slot', index: 1 }
+            slot: 30
+
         ============================================================================
         EVENTS (es.edwardbelt.pinnaprison.iapi.event)
         ============================================================================
@@ -330,6 +503,22 @@ module.exports = {
         BackpackSellEvent — BigDecimal getItemsSold(), Map<String,BigDecimal> getGains()
         AbilityActivateEvent (Cancellable) — String getAbilityId(), boolean isAutoCast()
         BoosterActivateEvent (Cancellable) — String getEconomy(), boolean isEnchantBooster(), double getMultiplier(), long getDurationMillis()
+        PickaxeSkinPurchaseEvent (Cancellable, PinnaPlayerEvent) — the built-in money purchase in the
+          pickaxe-skins GUI (cancel to run your own unlock flow); String getSkinId(), String getCurrency(), BigDecimal getAmount()
+
+        Gang events — GangEvent (abstract base, extends PinnaPrisonEvent): UUID getGangId(), String getGangName().
+        All below extend GangEvent except GangCreateEvent (no gang exists yet — extends PinnaPrisonEvent directly):
+        GangCreateEvent (Cancellable) — UUID getCreatorId(), String getCreatorName(), String getGangName()
+        GangDisbandEvent (Cancellable) — UUID getLeaderId()
+        GangInviteEvent (Cancellable) — UUID getInviterId(), UUID getTargetId()
+        GangJoinEvent (Cancellable) — UUID getPlayerId()
+        GangLeaveEvent — UUID getPlayerId()
+        GangKickEvent (Cancellable) — UUID getTargetId()
+        GangTransferEvent (Cancellable) — UUID getOldLeaderId(), UUID getNewLeaderId()
+        GangLevelUpEvent — BigDecimal getFromLevel(), getToLevel(), getLevelsGained()
+        GangPointsChangeEvent — BigDecimal getOldPoints(), getNewPoints(), getDelta()
+        GangUpgradePurchaseEvent (Cancellable) — UUID getPlayerId(), String getUpgradeId(), int getNewLevel()
+        GangChallengeCompleteEvent — UUID getPlayerId(), String getChallengeId(), BigDecimal getPointsAwarded()
 
         ============================================================================
         ENCHANT SYSTEM — the main reason to use this API
@@ -566,7 +755,7 @@ module.exports = {
         EdModel getModel(String modelId)
         EdEntity createEntity(EntityType type, Location location)
         EdNPC createNPC(Location location, String name, String skinTexture, String skinSignature) // packet player NPC
-        EdEntity createInteractionEntity(Location location, float width, float height)
+        EdEntity createInteractionEntity(Location location, float height, float width) // note: height BEFORE width
         EdEntity createBlockDisplay(Location location, Matrix4f transformation, Material material)
         EdEntity createItemDisplay(Location location, Matrix4f transformation, String itemData, int[] customModelData, String nbtData)
         EdWorld createWorld()
@@ -588,9 +777,22 @@ module.exports = {
         void setEquipment(EntityEquipmentSlot slot, ItemStack item)
         void playAnimation(EntityAnimation animation)
         void setSlimeSize(int size); void setSmall(); void setInvisible()
+        void setSheepColor(EdColor color)           // sheep wool colour
+        void setScale(float scale)                  // minecraft:scale attribute, 1 = normal (1.21.x+; no-op on 1.20.4)
+        void setDinnerbone(boolean d); boolean isDinnerbone() // render upside down (living entities; while on, any display name is shown via a text-display passenger instead of the name tag)
         void setDisplayName(String name); void setGlowing(EdColor color) /* 16 vanilla chat colours only — see GLOWING WARNING */; float getNameHeight()
         void setText(List<String> lines)            // text-display only: update lines in place (no flicker)
         void setBillboard(BillboardMode mode)       // display entities (text/block/item): rotation constraint — call before spawn(); default CENTER (faces player)
+        // Display-entity styling — set BEFORE spawn() when possible (rides in the spawn metadata); calling
+        // after spawn also broadcasts a metadata update to watchers. All no-ops on non-display entities:
+        void setBackground(int argb)                // text displays: ARGB background (0xAARRGGBB); 0 = fully transparent (vanilla default 0x40000000 semi-transparent black)
+        void setShadowRadius(float radius)          // ground shadow in blocks; 0 = none (default)
+        void setShadowStrength(float strength)      // 1 = default, higher = darker; needs shadowRadius > 0
+        void setDisplayWidth(float w); void setDisplayHeight(float h) // culling box; 0 (default) = never culled
+        void setLineWidth(int width)                // text displays: wrap width in pixels (default 200)
+        void setTextShadow(boolean shadowed)        // text displays: character drop shadow (off by default)
+        void setSeeThrough(boolean seeThrough)      // text displays: visible through blocks (off by default)
+        void setTeleportDuration(int ticks)         // displays: teleport interpolation 0-59 ticks — while set, tp/shortTp/goal moves GLIDE smoothly instead of snapping
         Vector getPosition()
         void tp(double x, double y, double z); void shortTp(double x, double y, double z) // shortTp = move packet-entities inside goals
         void rotateBodyAndMove(double x, double y, double z, float yaw, float pitch)
@@ -602,6 +804,7 @@ module.exports = {
         void setYawHead(float yaw); void setYaw(float yaw); void setPitch(float pitch)
         void rotateBody(float yaw, float pitch); void rotateHead(float yaw); Vector getLocVector()
         void setPassengers(List<EdEntity> passengers); void addPassenger(EdEntity passenger)
+        void resendPassengers(Player player)        // re-send the mount packet to ONE player: after showing an already-spawned vehicle + passengers to a new watcher (passengers last), call this or the passengers won't ride for them
         void addGoal(EdGoal goal); void startNextGoal(); void onGoalComplete()
         Queue<EdGoal> getGoalQueue(); EdGoal getCurrentGoal(); void setCurrentGoal(EdGoal goal)
         void clearGoals(); void skipCurrentGoal()
@@ -614,6 +817,17 @@ module.exports = {
           boolean isNameTagVisible(); void setNameTagVisible(boolean); boolean isSneaking(); void setSneaking(boolean);
           void lookAt(double x, double y, double z); void lookAt(Vector target)
         EntityHolder class: es.edwardbelt.edlib.iapi.entity — ctors (Entity) or (EdEntity); Vector getPosition()
+        EdEntityVariantable interface (extends EdEntity): void setVariant(EntityVariant.Variant variant)
+          // mob variants for packet entities (cast the EdEntity from createEntity for supported types).
+          // EntityVariant (es.edwardbelt.edlib.iapi.entity) holds nested enums, each implements Variant:
+          //   Axolotl (LUCY, WILD, GOLD, CYAN, BLUE), Cat (TABBY, BLACK, RED, SIAMESE, BRITISH_SHORTHAIR,
+          //   CALICO, PERSIAN, RAGDOLL, WHITE, JELLIE, TUXEDO), Chicken/Cow/Frog/Pig (TEMPERATE, COLD, WARM),
+          //   Mooshroom (RED, BROWN), Parrot (RED, BLUE, GREEN, CYAN, GRAY), Rabbit (BROWN, ALBINO, BLACK,
+          //   BLACK_AND_WHITE, GOLD, SALT_AND_PEPPER, KILLER_BUNNY), Salmon (SMALL, MEDIUM, LARGE),
+          //   Fox (RED, SNOW), Llama (CREAMY, WHITE, BROWN, GRAY), Panda (DEFAULT, AGGRESSIVE, LAZY, WORRIED,
+          //   PLAYFUL, WEAK, BROWN), Wolf (PALE, ASHEN, BLACK, CHESTNUT, RUSTY, SNOWY, SPOTTED, STRIPED, WOODS)
+          // static <T> EntityVariant.getVariant(EntityType type, String value) resolves a config string ("snow",
+          // "killer_bunny" uses the in-game value e.g. "evil") to the enum constant, null if unknown.
 
         EdModel interface: es.edwardbelt.edlib.iapi.model
         String getId(); Float getMaxHeight(); EdModelEntity createEntity(Location location)
@@ -621,6 +835,13 @@ module.exports = {
         Map<String,EdEntity> getPassengers(); EdModel getModel(); void setYaw(float)/setPitch(float)/rotate(float,float);
         void spawn(); void setGlowing(EdColor) /* 16 vanilla chat colours only — see GLOWING WARNING */; void addWatcher(Player); void remove();
         void playAnimation(String)/playLoopAnimation(String)/stopAnimation(); boolean isPlayingAnimation(); String getCurrentAnimation()
+        void setScale(float scale)                  // scales the whole model (parts + animation keyframes) around its anchor; works before/after spawn, safe mid-animation
+        float getScale()
+        void setTeleportDuration(int ticks)         // teleport interpolation on every display part — model moves glide (see EdEntity#setTeleportDuration)
+        void setSmoothMovement(int interpolationTicks) // detaches parts from the anchor and drives them with interpolated teleports; enable BEFORE spawn(), then move with tp(...) — or syncParts() each tick when a goal drives the main entity
+        void tp(double x, double y, double z)       // teleport whole model (anchor, parts, name, hitbox), keeps rotation
+        void tp(double x, double y, double z, float yaw, float pitch) // + rotate in the same packet; in smooth mode position AND rotation interpolate together (fluid banking turns)
+        void syncParts()                            // snap every part to the main entity's position — call each tick when a goal moves the main entity in smooth mode
 
         Goal System (es.edwardbelt.edlib.iapi.entity.goal) — drive packet-entity movement
         EdGoal abstract class — void start()/init()/forceStop(); boolean isRunning()/shouldExecute(); void tick();
@@ -630,9 +851,16 @@ module.exports = {
         EdGoalMove(Vector moveGoal, double speed) — straight-line move; setAffectY/setSendRotationEachTick/setInvertRotation/setSendRotation
         EdGoalArchMove(Vector end, double speed, long duration)
         EdGoalParabolicMove(Vector end, double height, long duration)
+        EdGoalDisplayParabolicMove(Vector end, double height, long duration, int keyframeTicks, Matrix4f baseTransform)
+          // parabolic flight for DISPLAY entities with client-side interpolation: instead of teleporting each
+          // tick (EdGoalParabolicMove, can look choppy) the transformation translation is keyframed every
+          // keyframeTicks and the client glides between keyframes — perfectly smooth. baseTransform = the
+          // display's standing transformation (scale/centering; null = identity); each keyframe sends
+          // translate(arcOffset) * baseTransform. The underlying entity never moves — use getVisualPosition()
+          // for where viewers see it (particle trails). Goal ends after the final glide, then endRunnable fires.
         EdGoalOrbit(Vector center, double radius, double angularSpeed, boolean clockwise, int ticksDuration) — getCenterPoint/getRadius/isClockwise/getCurrentAngle/setAffectY/...
         EdGoalFollowEntity(EntityHolder target, double followDistance, double speed, long duration) // huge duration = "infinite"
-        EdGoalDelay — getProgress/getRemainingTicks/getRemainingSeconds (use to pause a goal chain)
+        EdGoalDelay(int delayTicks) — getProgress/getRemainingTicks/getRemainingSeconds (use to pause a goal chain)
         You can also write your own goal: extend EdGoal, override shouldExecute()/tick(), and move with EdEntity#shortTp.
 
         SCHEDULING (es.edwardbelt.edlib.iapi.task) — EdLib's own scheduler, fine for packet work:
@@ -647,6 +875,20 @@ module.exports = {
         Bukkit world/entities/inventory. For timed entity sequences prefer goal runnables (setEndRunnable
         / setEachTickRunnable) or EdGoalDelay over manual timers. A common fail-safe: schedule an
         asyncLater that despawnInMines the entity in case the player leaves mid-animation.
+
+        PACKET WORLDS (es.edwardbelt.edlib.iapi.world) — in-memory "fake" worlds streamed to players:
+        EdWorld (from EdLibAPI#createWorld()):
+          EdChunk getOrCreateChunk(int chunkX, int chunkZ)   // creates an empty chunk if missing
+          void addWatcher(Player); void removeWatcher(Player); Collection<Player> getWatchers()
+          EdWorld copy()                                     // deep copy (chunks cloned, watchers not)
+        EdChunk: (x/z are chunk-local 0-15, y is absolute world height)
+          void setBlock(int x, int y, int z, Material material); Material getBlock(int x, int y, int z)
+          void send(Player player)                           // stream to the player as a level-chunk packet
+          Object getPacket()                                 // the built NMS chunk packet (version-specific type)
+          EdChunkCoordIntPair getChunkCoord(); EdChunkSection getChunkSection(int index); EdChunk copy()
+        EdChunkSection: void setBlockId(int x, int y, int z, int blockId) // raw NMS palette ids — only meaningful within the same EdLib version
+        EdChunkCoordIntPair: plain value type (safe map key) — int getX(), int getZ()
+        ChunkBlockConsumer (functional): void accept(int sectionIndex, Vector position, int blockId) // callback receiving each non-air block of a live chunk
 
         Enums:
         EdColor (es.edwardbelt.edlib.iapi): BLACK, DARK_BLUE, DARK_GREEN, DARK_AQUA, DARK_RED, DARK_PURPLE,
