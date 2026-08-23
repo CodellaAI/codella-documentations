@@ -2,6 +2,9 @@ module.exports = {
     name: 'EdPerks',
     description: 'EdPerks stamps a rolled "perk" onto a player\'s main tool — a pickaxe, sword, rod, whatever the active provider owns — granting stat boosts at a rolled level. Its API is provider-based: any plugin can register a PerkProvider so EdPerks knows how to find that plugin\'s tool, which stats it supports, and what to do when a perk lands, plus read/write perks on items and drive the roll and ticket economy directly.',
     pluginId: 'EdPerks',
+    systemDownloadURL: `
+        https://raw.githubusercontent.com/CodellaAI/codella-documentations/main/lib/EdPerks-API.jar
+    `,
     dependencies: `
         Java 21
     `,
@@ -15,7 +18,7 @@ module.exports = {
                 <artifactId>edperks-api</artifactId>
                 <version>1.0</version>
                 <scope>system</scope>
-                <systemPath>\${basedir}/lib/EdPerks.jar</systemPath>
+                <systemPath>\${basedir}/lib/EdPerks-API.jar</systemPath>
             </dependency>
         </dependencies>
     `,
@@ -55,17 +58,21 @@ module.exports = {
         \`\`\`
 
         EdPerksAPI:
-        void registerProvider(PerkProvider provider)
+        void registerProvider(PerkProvider provider)       // safe to call from another plugin's onEnable
         List<PerkProvider> getProviders()
-        PerkProvider getActiveProvider(Player player)      // which provider owns this player's tool
-        AppliedPerk getPerk(ItemStack item)                // the perk on an item, or null
-        ItemStack setPerk(ItemStack item, String perkId, int level)   // returns the stamped item
-        ItemStack clearPerk(ItemStack item)
-        AppliedPerk roll(Player player)                    // perform a roll for them (consumes a ticket)
+        PerkProvider getActiveProvider(Player player)      // the provider managing the tool they are
+                                                           // currently HOLDING, or null if none
+        AppliedPerk getPerk(ItemStack tool)                // the perk on an item, or null
+        ItemStack setPerk(ItemStack tool, String perkId, int level)   // returns the stamped item
+        ItemStack clearPerk(ItemStack tool)                // returns the cleaned item
+        AppliedPerk roll(Player player)                    // rolls and applies a perk to their held
+                                                           // tool (honours pity); null if it couldn't
         int getTickets(UUID playerId)
         void addTickets(UUID playerId, int amount)         // negative to take
         int getTotalRolls(UUID playerId)
         static EdPerksAPI getInstance(); static void setInstance(EdPerksAPI)
+        // The singleton is published at the END of EdPerks' onEnable, so fetch it from your own
+        // onEnable with depend: [EdPerks], or from a delayed task.
 
         ============================================================================
         AppliedPerk — a perk sitting on an item
@@ -130,8 +137,17 @@ module.exports = {
 
         BoostStat (es.edwardbelt.edperks.iapi.provider):
         BoostStat(String key, String displayName)
-        BoostStat(String key, String displayName, boolean inverted)   // inverted = lower is better
-        String getKey(); String getDisplayName(); boolean isInverted()
+        BoostStat(String key, String displayName, boolean inverted)
+        String getKey()          // the stable id used in perk configs and NBT, e.g. "damage"
+        String getDisplayName()  // the human label used in perk lore, e.g. "Damage"
+        boolean isInverted()     // higher values are WORSE for the player (e.g. a millisecond
+                                 // attack-speed reduction). Informational for hosts/UI only —
+                                 // EdPerks always stores the raw value.
+
+        {IMPORTANT} A perk boost whose key is not in the active provider's supportedStats() simply
+        contributes NOTHING on that host — it is not an error. That is deliberate: it lets one perk
+        catalogue serve several different host plugins (EdDungeons, EdTools, a prison pickaxe…),
+        each picking up only the stats it understands.
 
         \`\`\`java
         public class MyToolProvider implements PerkProvider {

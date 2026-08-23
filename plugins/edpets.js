@@ -2,6 +2,9 @@ module.exports = {
     name: 'EdPets',
     description: 'EdPets gives players collectable pets that follow them, level up from activity, grant named stat buffs while active, and fuse into rarer pets. Its API exposes three sub-APIs — pets (give/level/slots/storage), buffs (read a player\'s active boost for a stat key and feed experience into it) and visuals (animations, held-item override, show/hide) — plus the full pet lifecycle as Bukkit events.',
     pluginId: 'EdPets',
+    systemDownloadURL: `
+        https://raw.githubusercontent.com/CodellaAI/codella-documentations/main/lib/EdPets-API.jar
+    `,
     dependencies: `
         Java 21
     `,
@@ -15,7 +18,7 @@ module.exports = {
                 <artifactId>edpets-api</artifactId>
                 <version>1.0</version>
                 <scope>system</scope>
-                <systemPath>\${basedir}/lib/EdPets.jar</systemPath>
+                <systemPath>\${basedir}/lib/EdPets-API.jar</systemPath>
             </dependency>
         </dependencies>
     `,
