@@ -1,6 +1,6 @@
 module.exports = {
     name: 'PinnaPrison',
-    description: 'API to access PinnaPrison features: packet-based private mines, pickaxe enchants (custom API enchants), currencies (incl. external-plugin currencies), levelings, rebirth, backpacks, autosell, boosters (incl. live boost providers), crystals, abilities, attributes, autominers, bombs, drills, gangs, pickaxe skins, custom mine placeables, config-driven GUIs, action-bar control, number formatting and offline player data — plus the low-level EdLib API for packet-based fake entities, display styling, mob variants, custom models, packet worlds and goal-based AI used to build crazy animated mine enchants.',
+    description: 'API to access PinnaPrison features: packet-based private mines, pickaxe enchants (custom API enchants with chaining), currencies (incl. external-plugin currencies), levelings, rebirth, backpacks (upgrades + attachments), autosell, boosters (incl. live boost providers), crystals, abilities, attributes, autominers, bombs, drills, mine powerups, gangs, pickaxe skins, pickaxe NBT persistence, variables, custom mine placeables, config-driven GUIs, action-bar control, number formatting and offline player data — plus the low-level EdLib API for packet-based fake entities, display styling, ModelEngine/MythicMobs models, mob variants, packet worlds and goal-based AI used to build crazy animated mine enchants.',
     pluginId: 'PinnaPrison',
     systemDownloadURL: `
         https://raw.githubusercontent.com/CodellaAI/codella-documentations/main/lib/PinnaPrison-API.jar
@@ -16,8 +16,8 @@ module.exports = {
         <dependencies>
             <!-- PinnaPrison main API -->
             <dependency>
-                <groupId>es.edwardbelt.pinnaprison</groupId>
-                <artifactId>api</artifactId>
+                <groupId>es.edwardbelt</groupId>
+                <artifactId>pinnaprison-api</artifactId>
                 <version>1.0</version>
                 <scope>system</scope>
                 <systemPath>\${basedir}/lib/PinnaPrison-API.jar</systemPath>
@@ -25,8 +25,8 @@ module.exports = {
 
             <!-- EdLib low-level API (packet entities, models, goals) -->
             <dependency>
-                <groupId>es.edwardbelt.edlib</groupId>
-                <artifactId>api</artifactId>
+                <groupId>es.edwardbelt</groupId>
+                <artifactId>edlib-api</artifactId>
                 <version>1.0</version>
                 <scope>system</scope>
                 <systemPath>\${basedir}/lib/EdLib-API.jar</systemPath>
@@ -39,24 +39,24 @@ module.exports = {
          * Two system dependencies:
          *
          * EdLib-API.jar (es.edwardbelt.edlib.iapi):
-         * - Low-level, packet-based server functionality (no real entities/blocks)
-         * - Fake entity creation + manipulation (EdEntity), block/item/text displays
-         *   (full display styling: background, shadows, line width, teleport interpolation),
-         *   mob variants, custom models with animations + smooth movement
+         * - Low-level, packet-based server functionality (no real entities/blocks ever exist)
+         * - Fake entity creation + manipulation (EdEntity), block/item/text displays with full
+         *   display styling, armor-stand arm posing, real players as client-side passengers,
+         *   mob variants, ModelEngine models with animations + smooth movement, MythicMobs lookup
          * - Goal-based AI for entity movement (EdGoal + impl goals)
          * - Action bars, XP bars, boss bars, per-player block packets, packet worlds (EdWorld)
          * - Cross-version (1.20.3 -> 1.26) NMS abstraction
-         * - Everything in EdLib runs fine asynchronously (it is all packets)
+         * - EVERYTHING in EdLib is packets, so it all runs fine ASYNCHRONOUSLY
          *
          * PinnaPrison-API.jar (es.edwardbelt.pinnaprison.iapi):
-         * - High-level prison integration: mines, enchants, currencies, levelings,
-         *   rebirth, backpacks, autosell, boosters, crystals, abilities, attributes,
-         *   autominers, bombs, drills, gangs, pickaxe + pickaxe skins and GUIs
+         * - High-level prison integration: mines, enchants, currencies, levelings, rebirth,
+         *   backpacks, autosell, boosters, crystals, abilities, attributes, autominers, bombs,
+         *   drills, powerups, gangs, pickaxe + pickaxe skins, variables and GUIs
          * - Register custom pickaxe (mine) enchants with full proc/animation behaviour
          * - Break + reward blocks exactly like vanilla mining
-         * - Bridge external economies in, register live boost providers, custom mine
-         *   placeables and custom GUI item types, control the action bar, format
-         *   numbers like the server, and read/edit OFFLINE players' data
+         * - Bridge external economies in, register live boost providers, custom mine placeables,
+         *   custom GUI item types, control the action bar, format numbers like the server, keep
+         *   your own NBT alive on the pickaxe, and read/edit OFFLINE players' data
          */
 
         plugin.yml: add only PinnaPrison as a 'depend' (EdLib's API ships inside the PinnaPrison jar):
@@ -69,11 +69,74 @@ module.exports = {
         \`\`\`
 
         ============================================================================
+        !!! GOLDEN RULES — READ THIS BEFORE WRITING ANY CODE !!!
+        ============================================================================
+        These are not style preferences. Breaking any of them produces a broken enchant.
+
+        1) ASYNC BY DEFAULT. A mine enchant declares \`asyncSafe() { return true; }\` and does only
+           packet/data work: MineService break methods, EdLib entities/goals, currency changes,
+           per-player particles/sounds. Everything in EdLib is packets, so entity creation,
+           spawning, movement, goals, displays and ModelEngine models are ALL safe off the main
+           thread and MUST stay off it (the mining pipeline is a Netty thread; hopping to the main
+           thread for every proc destroys TPS). The ONLY exception is the ENDER DRAGON, whose
+           constructor fires a Bukkit event Paper requires to be sync — create + spawn that one
+           inside \`EdLibAPI.getExecutor().sync(...)\`, then animate it async as usual.
+
+        2) PARTICLES AND SOUNDS ARE PACKETS, SO THEY ARE ASYNC TOO.
+           \`player.spawnParticle(...)\` / \`player.playSound(...)\` only build and send a packet —
+           call them directly from the async proc thread. Never schedule a sync task just for FX.
+
+        3) ENTITIES BELONG TO THE MINE, NOT TO THE PLAYER.
+           Show them with \`mines.spawnInMine(player, entity)\` and remove them with
+           \`mines.despawnInMine(player, entity)\`. NEVER \`entity.addWatcher(p) + entity.spawn()\`
+           and NEVER \`entity.remove()\` for something inside a mine. spawnInMine gives you: every
+           current viewer sees it, members/visitors arriving mid-animation see it, it despawns when
+           a player leaves or switches mines instead of following them, it is torn down with the
+           mine, and it automatically honours the mob-entities toggle (rule 4).
+
+        4) RESPECT ALL THE /settings TOGGLES. Every player can mute things in \`/settings\`:
+             enchants.isMessagesDisabled(uuid)          -> chat
+             enchants.isProcMessageDisabled(uuid, id)   -> this enchant's proc message
+             enchants.isSoundsDisabled(uuid)            -> sounds
+             enchants.isParticlesDisabled(uuid)         -> particles / visual FX
+             enchants.isMobEntitiesDisabled(uuid)       -> packet MOBS spawned by enchants
+             mines.isVirtualBlockBreaking(player)       -> "pay me, don't empty my mine"
+           - Messages: just use \`enchants.sendProcMessage(...)\`; it checks both message toggles.
+           - Sounds/particles: check PER VIEWER, inside the loop, before sending the packet.
+           - Mob entities: \`spawnInMine\` already skips those viewers. Only check it yourself if
+             you show an entity by hand (e.g. \`spawnForPlayer\`, or an \`addWatcher\` outside a mine).
+             Text/block/item DISPLAYS are never affected by that toggle.
+           - Virtual block breaking: the MineService break methods already handle it — they pay for
+             every block and return the real count while leaving the mine standing. You only care
+             if you faked blocks yourself (rule 5).
+
+        5) VIRTUAL BLOCK BREAKING + FAKE BLOCKS. If your animation disguises blocks (e.g. turns a
+           region to ICE before shattering it) use \`mines.disguiseBlocks(...)\` and ALWAYS
+           \`mines.revealBlocks(...)\` when the animation ends. Normally the chunk resend after a
+           break clears a disguise for free, but under Virtual Block Breaking nothing is broken and
+           no resend happens, so the fake blocks would linger on the client forever.
+
+        6) FX GO TO THE WHOLE MINE. Particles/sounds are per-player packets. Send them to
+           \`mines.getMineViewers(player)\` (digger + co-op members + visitors), not just the digger,
+           gating each viewer on their own toggle. The more (gated) particle FX, the better.
+
+        7) NEVER HARDCODE A TUNABLE. Radius, speed, durations, currency ids, reward amounts, entity
+           types, colours — all of it goes in the enchant's \`settings:\` yaml block and is read with
+           \`enchants.getSettings(id)\` INSIDE onProc (so \`/pinna reload\` picks it up).
+
+        8) NEVER TOUCH THE REAL WORLD. Mines have no real blocks and no real entities. All block
+           work goes through MineService; all visuals go through EdLib packets.
+
+        9) ALWAYS CLEAN UP. Every entity you spawn gets a despawn on the goal's endRunnable AND a
+           fail-safe \`EdLibAPI.getExecutor().asyncLater(...)\` despawn, in case the player logs out
+           or leaves the mine mid-animation.
+
+        ============================================================================
         ENTRY POINT
         ============================================================================
         PinnaPrisonAPI interface: es.edwardbelt.pinnaprison.iapi
-        Grab it AFTER PinnaPrison has enabled (e.g. your onEnable, or a delayed task). getInstance()
-        returns null until PinnaPrison finished enabling.
+        Grab it AFTER PinnaPrison has enabled (your onEnable with depend: [PinnaPrison], or a
+        delayed task). getInstance() returns null until PinnaPrison finished enabling.
         Static Methods:
         static void setInstance(PinnaPrisonAPI instance)
         static PinnaPrisonAPI getInstance()
@@ -82,6 +145,7 @@ module.exports = {
         EnchantService getEnchants()
         LevelingService getLeveling()
         PickaxeService getPickaxe()
+        PickaxeSkinService getPickaxeSkins()
         MineService getMines()
         BackpackService getBackpacks()
         BoosterService getBoosters()
@@ -93,13 +157,14 @@ module.exports = {
         SellService getSell()
         BombService getBombs()
         DrillService getDrills()
+        PowerupService getPowerups()        // mine powerups (floating owner-only boosts)
         GangService getGangs()
-        PickaxeSkinService getPickaxeSkins()
         PlayerDataService getPlayers()      // offline-capable raw data access
         PlaceableService getPlaceables()    // custom mine placeable types
         DisplayService getDisplay()         // action-bar control
         FormatService getFormat()           // format.yml number formatting/parsing
         GuiService getGuis()                // config-driven GUIs (iapi.gui package)
+        VariableService getVariables()      // variables.yml static/changeable variables
 
         Example:
         \`\`\`java
@@ -110,10 +175,13 @@ module.exports = {
         ============================================================================
         SERVICES (es.edwardbelt.pinnaprison.iapi.service)
         ============================================================================
-        Note: amounts are java.math.BigDecimal. ids are config file names (e.g. "tokens",
-        "money", "gems", "rankupxp", "pickaxelevel", "rebirth"). All services are thread-safe.
+        Note: amounts are java.math.BigDecimal. ids are config file names (e.g. "tokens", "money",
+        "gems", "rankupxp", "pickaxelevel", "rebirth"). All services are thread-safe unless a
+        method says otherwise.
 
-        CurrencyService:
+        ----------------------------------------------------------------------------
+        CurrencyService
+        ----------------------------------------------------------------------------
         Set<String> getCurrencyIds()
         boolean exists(String currencyId)
         String getDisplayName(String currencyId)
@@ -122,8 +190,8 @@ module.exports = {
         void setBalance(UUID playerId, String currencyId, BigDecimal amount)
         void addBalance(UUID playerId, String currencyId, BigDecimal amount)
         void removeBalance(UUID playerId, String currencyId, BigDecimal amount)
-        void addBalanceBoosted(UUID playerId, String currencyId, BigDecimal amount) // applies booster/crystal/attribute/rebirth multipliers — use this for enchant rewards
-        BigDecimal getBoostMultiplier(UUID playerId, String currencyId)
+        void addBalanceBoosted(UUID playerId, String currencyId, BigDecimal amount) // applies booster/crystal/attribute/rebirth/gang multipliers — ALWAYS use this for enchant rewards
+        BigDecimal getBoostMultiplier(UUID playerId, String currencyId)             // total income multiplier (1 + bonuses)
         boolean has(UUID playerId, String currencyId, BigDecimal amount)
         void registerExternalCurrency(ExternalCurrency currency) // bridge another plugin's economy in
         boolean isExternal(String currencyId)
@@ -137,36 +205,42 @@ module.exports = {
           void addBalance(UUID playerId, BigDecimal amount)
           void removeBalance(UUID playerId, BigDecimal amount)
 
-        EnchantService: (see the ENCHANT SYSTEM section for registerEnchant + onProc)
+        ----------------------------------------------------------------------------
+        EnchantService  (see the ENCHANT SYSTEM section for registerEnchant + onProc)
+        ----------------------------------------------------------------------------
         void registerEnchant(String enchantId, APIEnchant enchant)
         Set<String> getEnchantIds()
         boolean exists(String enchantId)
         String getDisplayName(String enchantId)
         BigDecimal getMaxLevel(String enchantId)
-        ConfigurationSection getSettings(String enchantId)     // the enchant's settings: block — read YOUR custom config values here (currency id, amount, animation knobs, ...). null if none. Read it in onProc (it is reloaded by /pinna reload).
+        ConfigurationSection getSettings(String enchantId)     // the enchant's settings: block — YOUR custom config values (currency id, amount, animation knobs, ...). null if none. Read it INSIDE onProc so /pinna reload picks up edits.
         String getProcMessage(String enchantId)                // the configured proc-message (raw), or null
-        void sendProcMessage(Player player, String enchantId, Object... replacements) // sends proc-message honouring mute toggles + colour + PAPI + {placeholder},value pairs. The easy, configurable proc message for every API enchant.
+        void sendProcMessage(Player player, String enchantId, Object... replacements) // sends proc-message honouring BOTH mute toggles + colours + PAPI + {placeholder},value pairs. The easy, configurable proc message for every API enchant.
         Map<String, BigDecimal> getPlayerEnchants(UUID playerId)
         BigDecimal getLevel(UUID playerId, String enchantId)
         void setLevel(UUID playerId, String enchantId, BigDecimal level)
         void addLevel(UUID playerId, String enchantId, BigDecimal levels)
         void removeLevel(UUID playerId, String enchantId, BigDecimal levels)
-        BigDecimal getChance(UUID playerId, String enchantId)   // effective proc chance 0-100
+        BigDecimal getChance(UUID playerId, String enchantId)   // effective proc chance 0-100 (booster/crystal/prestige aware)
         BigDecimal getCost(UUID playerId, String enchantId, BigDecimal levels)
         BigDecimal getMaxLevelsAffordable(UUID playerId, String enchantId)
         int getPrestige(UUID playerId, String enchantId)
         void setPrestige(UUID playerId, String enchantId, int prestige)
         boolean canPrestige(UUID playerId, String enchantId)
         void prestige(Player player, String enchantId)
-        boolean isDisabled(UUID playerId, String enchantId)     // the player's on/off toggle
-        boolean isMessagesDisabled(UUID playerId)               // /settings — honour before chat
-        boolean isSoundsDisabled(UUID playerId)                 // /settings — honour before sounds
-        boolean isParticlesDisabled(UUID playerId)              // /settings — honour before particles
-        boolean isProcMessageDisabled(UUID playerId, String enchantId)
+        boolean isDisabled(UUID playerId, String enchantId)     // the player's on/off toggle for this enchant
+        // ---- the /settings mute toggles: HONOUR ALL OF THEM ----
+        boolean isMessagesDisabled(UUID playerId)               // chat (sendProcMessage already checks it)
+        boolean isProcMessageDisabled(UUID playerId, String enchantId) // per-enchant message toggle
+        boolean isSoundsDisabled(UUID playerId)                 // check PER VIEWER before playSound
+        boolean isParticlesDisabled(UUID playerId)              // check PER VIEWER before spawnParticle
+        boolean isMobEntitiesDisabled(UUID playerId)            // this viewer opted out of enchant-spawned packet MOBS (zombies, golems, bats, TNT, ModelEngine models). Text/block/item DISPLAYS are never affected. mines.spawnInMine() already applies this for you — only call it when you show an entity by hand.
         void tryProcEnchants(Player player, EnchantData data)   // rolls ALL the player's enchants
         void procEnchant(Player player, String enchantId, EnchantData data) // forces one (no chance roll)
 
-        LevelingService: (rankup, pickaxelevel, rebirth, ...)
+        ----------------------------------------------------------------------------
+        LevelingService  (rankup, pickaxelevel, rebirth, ...)
+        ----------------------------------------------------------------------------
         Set<String> getLevelingIds()
         boolean exists(String levelingId)
         BigDecimal getLevel(UUID playerId, String levelingId)
@@ -179,15 +253,28 @@ module.exports = {
         String getProgressBar(UUID playerId, String levelingId)
         float getProgressPercent(UUID playerId, String levelingId)
 
-        PickaxeService:
+        ----------------------------------------------------------------------------
+        PickaxeService
+        ----------------------------------------------------------------------------
         boolean isPickaxe(ItemStack item)
         ItemStack createPickaxe(Player player)
         ItemStack getPickaxe(Player player)
         void givePickaxe(Player player)
-        void updatePickaxe(Player player)
+        void updatePickaxe(Player player)                       // rebuild lore/enchants in place (main thread)
         int getEfficiency()
+        // --- keeping YOUR NBT alive on the pickaxe ---
+        // PinnaPrison rebuilds the pickaxe item from its config (a re-give, a skin change, the
+        // mine-world tools option handing it out on every entry). A rebuilt item would come back
+        // without your data, so declare your top-level NBT keys and snapshot them after writing.
+        void registerExternalTag(String nbtKey)                 // e.g. "MYPLUGIN_PERK"; call in onEnable
+        void unregisterExternalTag(String nbtKey)
+        Set<String> getExternalTags()
+        void saveExternalTags(Player player)                    // snapshot the registered keys currently on their pickaxe — call right after you change your NBT. MAIN THREAD (it reads the item)
+        void clearExternalTags(UUID playerId)                   // next pickaxe is built clean
 
-        MineService: (private mines are PACKET-BASED and per-player; live in one shared void world)
+        ----------------------------------------------------------------------------
+        MineService  (private mines are PACKET-BASED and per-player; one shared void world)
+        ----------------------------------------------------------------------------
         World getMinesWorld()
         boolean hasMine(Player player)
         boolean isInMine(Player player)
@@ -202,18 +289,27 @@ module.exports = {
         Vector getMaxCorner(Player player)
         String getMineType(Player player)
         Material getBlockAt(Player player, Vector position)     // AIR if mined, null if out of bounds
-        // The break methods pay the player EXACTLY like mining. Flags:
-        //   affectBlockCurrencies = grant rankup/pickaxe xp etc per block
-        //   affectAutosell        = collect blocks into backpack / autosell income
-        //   affectTokenGreed      = also pay the Token Greed enchant bonus
+
+        // ---- VIRTUAL BLOCK BREAKING ----
+        boolean isVirtualBlockBreaking(Player player)
+        // Players can turn Virtual Block Breaking on in /settings. While it is on every break method
+        // below still pays out EXACTLY as always and still returns the real block count, but the
+        // mine's blocks stay standing: no block packets, no depletion, no reset. Your enchant needs
+        // no special handling — it just works. Query this ONLY when your addon did something that
+        // assumed the blocks really vanished, e.g. lifting your own fake-block disguise.
+
+        // ---- BREAKING + PAYING (the mine the player is STANDING IN) ----
+        // These pay the player EXACTLY like mining. Flags:
+        //   affectBlockCurrencies = grant rankup/pickaxe xp etc per block   (usually false)
+        //   affectAutosell        = collect blocks into backpack / autosell (usually true)
+        //   affectTokenGreed      = also pay the Token Greed enchant bonus  (usually true)
         // They only touch the player's OWN joined mine, never the real world. Thread-safe.
         int breakBlocks(Player player, Collection<Vector> positions, boolean affectBlockCurrencies, boolean affectAutosell, boolean affectTokenGreed)
         int breakLayer(Player player, int y, boolean affectBlockCurrencies, boolean affectAutosell, boolean affectTokenGreed)
         int breakSphere(Player player, Vector center, double radius, boolean affectBlockCurrencies, boolean affectAutosell, boolean affectTokenGreed)
         boolean breakBlock(Player player, Vector position, boolean affectBlockCurrencies, boolean affectAutosell, boolean affectTokenGreed, boolean affectEnchants) // affectEnchants=true can chain-proc; use carefully
-        // The ...InOwnMine / mine-query methods below act on the player's OWNED mine even while they
-        // stand elsewhere (autominer-style features); the methods above act on the mine the player is
-        // standing in. All thread-safe.
+
+        // ---- the OWNED mine, even while the owner stands elsewhere (autominer-style) ----
         Material getBlockInOwnMine(Player owner, Vector position) // AIR if mined, null if out of bounds / no mine
         List<Vector> findBlocksNear(Player owner, Vector center, double radius, int limit) // up to limit random unbroken blocks in range (how built-in autominers pick targets); lock-free
         Vector findTopBlock(Player owner)                       // random unbroken block on the highest non-empty layer, or null
@@ -221,48 +317,82 @@ module.exports = {
         int getNonAirBlocks(Player owner)                       // unbroken blocks left (0 if unowned)
         int getTotalBlocks(Player owner)                        // total capacity broken+unbroken (0 if unowned)
         int breakBlocksInOwnMine(Player owner, Collection<Vector> positions, boolean affectBlockCurrencies, boolean affectAutosell, boolean affectTokenGreed) // breaks in the OWNED mine even while the owner roams; shows damage to viewers + checks reset threshold. All three flags false = raw break, pay through SellService#sell yourself (what built-in autominers do)
-        Collection<Player> getMineViewers(Player player)        // digger + co-op members + visitors — target packet FX at all of them
-        void spawnInMine(Player player, EdEntity entity)        // show a packet entity to the WHOLE mine (use instead of addWatcher+spawn)
-        void despawnInMine(Player player, EdEntity entity)      // untrack + despawn (use instead of EdEntity#remove)
+
+        // ---- VIEWERS + PACKET ENTITIES ----
+        Collection<Player> getMineViewers(Player player)        // digger + co-op members + visitors — target ALL packet FX at these
+        void spawnInMine(Player player, EdEntity entity)        // show a packet entity to the WHOLE mine + spawn it. USE THIS, never addWatcher+spawn. Honours the mob-entities toggle per viewer.
+        void spawnInMine(Player player, EdEntity entity, boolean enchantMob) // enchantMob=false for something that is part of the mine (a decoration, a boss, a shop entity) and must stay visible even for players who muted enchant mobs. The single-arg overload passes true.
+        void despawnInMine(Player player, EdEntity entity)      // untrack + despawn. USE THIS, never entity.remove()
+        void setEntityEquipment(Player player, EdEntity entity, EntityEquipmentSlot slot, ItemStack item)
+        // ^ dresses a spawnInMine entity AND remembers the item, so viewers who arrive later still
+        //   see it. EdLib's raw entity.setEquipment only reaches the watchers it had at that instant
+        //   and the spawn packet a late viewer gets carries no equipment — inside a mine always use this.
+
+        // ---- FAKE BLOCKS (client-side lies; the mine data is untouched) ----
+        List<Vector> disguiseBlocks(Player player, Collection<Vector> positions, Material material)
+        // Shows 'material' at every position the mine still has a block at, to every mine viewer.
+        // Skips positions outside the mineable area (those read the real shell/schematic) and already
+        // broken ones. RETURNS exactly what was disguised — break or reveal those afterwards.
+        void revealBlocks(Player player, Collection<Vector> positions)
+        // Re-sends each position's REAL current block (AIR where broken). ALWAYS call this at the end
+        // of an animation that disguised blocks: after a normal break the chunk resend clears the
+        // disguise for free, but under Virtual Block Breaking nothing is broken and no resend happens,
+        // so the fake blocks would stay on the client forever. Calling it unconditionally is safe.
+
         void visit(Player visitor, Player owner)
         void goToOwnMine(Player player)
 
-        BackpackService:
-        String getTierId(UUID playerId)
-        String getNextTierId(UUID playerId)
-        BigDecimal getSize(UUID playerId)
-        double getMultiplier(UUID playerId)
-        Map<String, BigDecimal> getItems(UUID playerId)
+        ----------------------------------------------------------------------------
+        BackpackService  (NO capacity tiers any more: value comes from UPGRADES bought with
+        currency and ATTACHMENTS handed out by command and equipped into slots)
+        ----------------------------------------------------------------------------
+        BigDecimal getSize(UUID playerId)                       // capacity; ZERO = unlimited
+        BigDecimal getBlocksMultiplier(UUID playerId)           // total blocks multiplier (1 + every bonus)
+        Map<String, BigDecimal> getItems(UUID playerId)         // item id -> amount
         BigDecimal getWeight(UUID playerId)
-        void addBlocks(Player player, Material material, int count)   // store mined blocks (or autosell)
+        BigDecimal addBlocks(Player player, Material material, int count) // store mined blocks (or instantly autosell); returns what actually landed after the multiplier + capacity clamp
         void sell(Player player)
-        void upgrade(Player player)
+        int getUpgradeLevel(UUID playerId, String upgradeId)
+        void setUpgradeLevel(UUID playerId, String upgradeId, int level)
+        boolean giveAttachment(UUID playerId, String attachmentId, int tier) // false if unknown id
+        int getAttachmentSlots(UUID playerId)
+        void setAttachmentSlots(UUID playerId, int slots)
+        int fuseAttachments(UUID playerId)                      // fuses every fusable group; returns fusions
         boolean isAutosellEnabled(UUID playerId)
         void setAutosell(UUID playerId, boolean enabled)
         boolean isBackpackItem(ItemStack item)
         ItemStack createBackpackItem(Player player)
         void openGui(Player player)
 
-        SellService:
+        ----------------------------------------------------------------------------
+        SellService
+        ----------------------------------------------------------------------------
         boolean isAutosellEnabled(UUID playerId)
         void setAutosell(UUID playerId, boolean enabled)
         boolean hasPrice(Material material)
-        Map<String, BigDecimal> sell(UUID playerId, Material material, BigDecimal amount) // returns per-currency gains
+        Map<String, BigDecimal> sell(UUID playerId, Material material, BigDecimal amount) // returns per-currency gains (boosters + visitor tax applied)
 
-        BoosterService: (personal + global currency-income / enchant-chance multipliers)
+        ----------------------------------------------------------------------------
+        BoosterService  (personal + global currency-income / enchant-chance multipliers)
+        ----------------------------------------------------------------------------
         boolean isEnabled()
         double getEconomyBoost(UUID playerId, String economy)         // 0 = none
         double getEnchantBoost(UUID playerId)
         void giveBooster(UUID playerId, String id, String economy, double multiplier, boolean enchantBooster, long durationSeconds) // default name "API Booster"; id is what removeBooster expects
-        void giveBooster(UUID playerId, String id, String name, String economy, double multiplier, boolean enchantBooster, long durationSeconds) // custom display name (shown in menu/boss bar); id is what removeBooster expects
+        void giveBooster(UUID playerId, String id, String name, String economy, double multiplier, boolean enchantBooster, long durationSeconds) // custom display name (menu/boss bar)
         void removeBooster(UUID playerId, String boosterId)
         void addGlobalBooster(String economy, double multiplier, boolean enchantBooster, long durationSeconds) // 0s = permanent
+        List<GlobalBoost> getGlobalBoosters()                         // snapshot of the active server-wide boosters (expired already dropped)
+        int removeGlobalBoosters(String economy)                      // a currency/enchant id, "enchants" for the global enchant-chance boost, or "all"; returns how many stopped
         void registerBoostProvider(String id, BoostProvider provider) // live computed boosts, never persisted — gone the moment you unregister or return 0
         void unregisterBoostProvider(String id)
+        GlobalBoost record (iapi.booster): (String name, String economy, double multiplier,
+          boolean enchantBooster, long endTimeMillis) + boolean isPermanent(), long timeLeftMillis()
         BoostProvider (es.edwardbelt.pinnaprison.iapi.booster) — conditional bonuses ("while holding a
-        streak", "while an event runs"). Stacks with regular boosters per boosters.yml. Queried on EVERY
-        boosted income + proc-chance lookup (hot async mining path): must be FAST (cached map lookups, no
-        I/O) and thread-safe. All methods default:
+        streak", "while an event runs"). Stacks with regular boosters per boosters.yml and applies even
+        while the boosters feature itself is disabled. Queried on EVERY boosted income + proc-chance
+        lookup (hot async mining path): must be FAST (cached map lookups, no I/O) and thread-safe.
+        All methods default:
           double getEconomyBoost(UUID playerId, String economy)  // extra above 1x, 0 = none; currency id = income, enchant id = that enchant's proc chance
           double getEnchantBoost(UUID playerId)                  // extra above 1x on every enchant's proc chance
           Collection<ProviderBoost> getBoostViews(UUID playerId, String economy) // display-only entries for the boosters GUI / %pinnaprison_boosters_names_<economy>%; empty = invisible (boost still applies)
@@ -273,17 +403,26 @@ module.exports = {
         ItemStack createBoosterItem(String id)
         void claim(Player player, ItemStack boosterItem)
 
-        CrystalService: (pickaxe crystals = per-key multipliers)
-        double getMultiplier(UUID playerId, String key)
+        ----------------------------------------------------------------------------
+        CrystalService  (pickaxe crystals = per-key multipliers)
+        ----------------------------------------------------------------------------
+        double getMultiplier(UUID playerId, String key)         // key = a currency id, an enchant id, or "all-enchants"
         int getSlots(UUID playerId)
         void setSlots(UUID playerId, int slots)
         void addSlots(UUID playerId, int amount)
         void removeSlots(UUID playerId, int amount)
         boolean isCrystalItem(ItemStack item)
         ItemStack createCrystalItem(String id)
-        void apply(Player player, ItemStack crystalItem)
+        CrystalInfo getCrystalData(ItemStack item)              // the item's rolled values, or null if not a crystal
+        void apply(Player player, ItemStack crystalItem)        // rolls the apply chance
+        void apply(Player player, ItemStack crystalItem, boolean skipRoll) // skipRoll=true always applies (slot + duplicate-boost checks still run); one crystal consumed either way
+        List<AppliedCrystal> getAppliedCrystals(UUID playerId)
+        CrystalInfo record (iapi.data):    (String id, int multiplier, int chance)   // 25 = +25%
+        AppliedCrystal record (iapi.data): (UUID uuid, String id, int multiplier)    // uuid = removable instance id
 
-        RebirthService:
+        ----------------------------------------------------------------------------
+        RebirthService
+        ----------------------------------------------------------------------------
         BigDecimal getRebirths(UUID playerId)
         BigDecimal getRequiredAmount(UUID playerId)
         BigDecimal getRequiredCost(UUID playerId)
@@ -295,12 +434,16 @@ module.exports = {
         double getEconomyBoost(UUID playerId, String currencyId)
         double getEnchantBoost(UUID playerId)
 
-        AttributeService:
+        ----------------------------------------------------------------------------
+        AttributeService
+        ----------------------------------------------------------------------------
         int getLevel(UUID playerId)
         double getEconomyBoost(UUID playerId, String currencyId)
         double getEnchantBoost(UUID playerId)
 
-        AbilityService:
+        ----------------------------------------------------------------------------
+        AbilityService
+        ----------------------------------------------------------------------------
         boolean exists(String abilityId)
         boolean isUnlocked(UUID playerId, String abilityId)
         void unlock(Player player, String abilityId)
@@ -309,19 +452,23 @@ module.exports = {
         void toggleSelect(Player player, String abilityId)
         boolean isAutoCast(UUID playerId)
         void setAutoCast(UUID playerId, boolean value)
-        long getCooldownRemaining(UUID playerId, String abilityId)
+        long getCooldownRemaining(UUID playerId, String abilityId)   // millis, 0 = ready
         void activateSelected(Player player, boolean auto)
+        void activateSelected(Player player, boolean auto, boolean ignoreCooldown) // ignoreCooldown=true fires even mid-cooldown — what a "proc your ability for free" enchant needs (the cooldown restarts either way)
+        void reduceCooldown(UUID playerId, String abilityId, long millis) // takes millis off the remaining cooldown, floored at ready
         boolean isAbilityItem(ItemStack item)
         ItemStack createAbilityItem(String abilityId)
         void applyItem(Player player, ItemStack abilityItem)
 
-        AutominerService:
+        ----------------------------------------------------------------------------
+        AutominerService
+        ----------------------------------------------------------------------------
         int getMaxMiners()
         Set<String> getEnchantIds()
         int getUnlockedSlots(UUID playerId)
         void addSlots(UUID playerId, int amount)
         boolean isSlotUnlocked(UUID playerId, String minerId)
-        double getBattery(UUID playerId)
+        double getBattery(UUID playerId)                        // seconds of runtime left
         void addBattery(UUID playerId, double amount)
         int getEnchantLevel(UUID playerId, String minerId, String enchantId)
         BigDecimal getUpgradeCost(UUID playerId, String minerId, String enchantId, int levels)
@@ -331,22 +478,38 @@ module.exports = {
         void summon(Player player, String minerId)
         void despawn(Player player, String minerId)
 
-        BombService:
+        ----------------------------------------------------------------------------
+        BombService / DrillService
+        ----------------------------------------------------------------------------
         boolean isEnabled()
-        boolean isBombItem(ItemStack item)
-        String getBombId(ItemStack item)
-        ItemStack createBombItem(String id)
-        void throwBomb(Player player, ItemStack bombItem)
+        boolean isBombItem(ItemStack item)   / boolean isDrillItem(ItemStack item)
+        String getBombId(ItemStack item)     / String getDrillId(ItemStack item)
+        ItemStack createBombItem(String id)  / ItemStack createDrillItem(String id)
+        void throwBomb(Player player, ItemStack bombItem)  / void useDrill(Player player, ItemStack drillItem)
 
-        DrillService:
-        boolean isEnabled()
-        boolean isDrillItem(ItemStack item)
-        String getDrillId(ItemStack item)
-        ItemStack createDrillItem(String id)
-        void useDrill(Player player, ItemStack drillItem)
+        ----------------------------------------------------------------------------
+        PowerupService  (Mine Powerups: owner-only floating heads granting a rolled temporary
+        boost when the mine OWNER walks over them — privatemines/powerups/<id>.yml)
+        ----------------------------------------------------------------------------
+        Set<String> getPowerupIds()                             // the file names in privatemines/powerups/
+        List<PowerupView> getActivePowerups(Player owner)       // what is floating in their mine right now
+        boolean spawnPowerup(Player owner, String powerupId)    // force-spawn ignoring the per-mine cap; fires PowerupSpawnEvent. Any thread
+        boolean spawnPowerup(Player owner, String powerupId, Location location) // same, at an exact spot (null = random top spot)
+        int claimPowerups(Player owner)                         // claim every live powerup as if walked over (autoClaimed=true); returns the count
+        int despawnPowerups(Player owner)                       // remove them all with no boost/actions; returns the count
+        PowerupView (es.edwardbelt.pinnaprison.iapi.powerup) — all getters thread-safe:
+          String getId(); String getName(); boolean hasBoost();
+          String getBoostEconomy()        // currency id or enchant id; empty for the global enchant boost
+          boolean isEnchantBoost()        // true for type: enchants (global enchant-chance boost)
+          double getMultiplier()          // the ROLLED bonus above 1x (0.85 = +85%); final unless a claim listener retunes it
+          long getBoostDurationSeconds()  // 0 = permanent
+          Location getLocation(); long getSecondsUntilDespawn(); boolean isFinished();
+          boolean claim()                 // claim for the owner now (fires PowerupClaimEvent, autoClaimed=true); any thread
 
-        GangService: (gang lookup + full lifecycle. Mutators bypass the /gang command's player-facing
-        checks — create requirements, permissions, invites — and fire the matching gang events)
+        ----------------------------------------------------------------------------
+        GangService  (gang lookup + full lifecycle. Mutators bypass the /gang command's
+        player-facing checks — create requirements, permissions, invites — and fire the events)
+        ----------------------------------------------------------------------------
         Optional<GangView> getGang(UUID gangId)
         Optional<GangView> getGangByName(String name)
         Optional<GangView> getPlayerGang(UUID playerId)
@@ -369,15 +532,18 @@ module.exports = {
         int getUpgradeLevel(UUID gangId, String upgradeId)
         boolean setUpgradeLevel(UUID gangId, String upgradeId, int level) // forces, ignoring point cost
         double getGangMultiplier(UUID playerId, String currencyId) // combined gang-upgrade income bonus above 1.0 (0 = no gang / no upgrade)
-        int getMaxMembers()
+        int getMaxMembers()                                     // base cap from gangs/config.yml
+        int getMaxMembers(UUID gangId)                          // base + every members-per-level upgrade that gang bought
         GangView (es.edwardbelt.pinnaprison.iapi.gang) — read-only LIVE view; mutate through the service:
           UUID getId(); String getName(); String getDescription(); UUID getLeader();
           Set<UUID> getMemberIds() (includes leader); int getMemberCount(); BigDecimal getLevel();
           BigDecimal getExperience(); BigDecimal getPoints(); int getUpgradeLevel(String upgradeId);
           boolean isMember(UUID playerId); boolean isLeader(UUID playerId)
 
-        PickaxeSkinService: (configured skins pickaxe/skins/*.yml + per-player owned/selected — build your
-        own unlock mechanics on top of the built-in visuals)
+        ----------------------------------------------------------------------------
+        PickaxeSkinService  (configured skins pickaxe/skins/*.yml + per-player owned/selected —
+        build your own unlock mechanics on top of the built-in visuals)
+        ----------------------------------------------------------------------------
         List<String> getSkinIds()                               // config order; first = free default
         PickaxeSkinInfo getSkin(String skinId)                  // null if unknown; snapshot — refetch after reload
         String getDefaultSkinId()
@@ -386,15 +552,19 @@ module.exports = {
         boolean isSkinOwned(UUID playerId, String skinId)       // default skin always owned
         boolean grantSkin(UUID playerId, String skinId)         // free grant, ignores sequential unlock order; thread-safe; does NOT equip
         boolean revokeSkin(UUID playerId, String skinId)        // default skin can't be revoked; if equipped, selection resets
-        void selectSkin(Player player, String skinId)           // equips: persists + rebuilds the pickaxe + plays equip sound. MAIN THREAD only
+        void selectSkin(Player player, String skinId)           // equips: persists + rebuilds the pickaxe + plays the equip sound. MAIN THREAD only
         Reads + grant/revoke are thread-safe (fine inside async BlockMineEvent listeners).
         PickaxeSkinInfo (es.edwardbelt.pinnaprison.iapi.data): String getId()/getName()/getPrimaryColor()/
           getSecondaryColor()/getMaterial(); int getModelData() (-1 = none); double getMultiplier() (extra
-          blocks per mined block, 0.4 = +40%, stacks with backpack multiplier); String getCostCurrency()
-          (null = no built-in cost); BigDecimal getCostAmount()
+          blocks per mined block, 0.4 = +40%, stacks with the backpack multiplier);
+          double getCurrencyMultiplier(String currencyId) (the skin's multipliers: section — additive
+          income bonus, 0 if none; the reserved backpack_blocks key is getMultiplier(), not a currency);
+          String getCostCurrency() (null = no built-in cost); BigDecimal getCostAmount() (never null)
         To intercept the built-in money purchase (pickaxe-skins GUI) listen to PickaxeSkinPurchaseEvent.
 
-        PlayerDataService: (read/edit ANY player's stored data — OFFLINE included; built for web panels/bots)
+        ----------------------------------------------------------------------------
+        PlayerDataService  (read/edit ANY player's stored data — OFFLINE included; for panels/bots)
+        ----------------------------------------------------------------------------
         PlayerData getData(UUID playerId)                       // null if not in memory — ensureLoaded first for offline players
         boolean hasData(UUID playerId)                          // in memory OR on disk/database
         boolean isLoaded(UUID playerId)
@@ -403,17 +573,41 @@ module.exports = {
         boolean editEconomy(UUID playerId, String kind, String dataId, String op, BigDecimal amount)
           // kind: "currency"|"leveling"|"enchant"; op: "set"|"add"|"remove". RAW admin override: no events,
           // no boosts, works online or offline, persists async. false only if the player never joined. Off main thread
-        Collection<PlayerData> getAllData()                     // every stored player incl. offline (leaderboards/exports). HEAVY — off main thread + cache. Empty when backend can't enumerate (Mongo)
+        Collection<PlayerData> getAllData()                     // every stored player incl. offline (leaderboards/exports). HEAVY — off main thread + cache. Empty when the backend can't enumerate (Mongo)
         PlayerData (es.edwardbelt.pinnaprison.iapi.data) — read view; maps hold STORED entries only (absent
         id = default/zero): UUID getUniqueId(); BigDecimal getRawBlocksBroken() (lifetime hand-mined);
           Map<String,BigDecimal> getCurrencies()/getLevelings()/getEnchants();
           Map<String,Integer> getEnchantPrestiges() (may be null on old saves); String getMineType()/getMineTier();
           int getMineExpansions(); double getMineTax() (0-100); boolean isMineOpen()
 
-        PlaceableService: (register custom mine placeable types — packet-based decorations/interactables
-        configured per mine type under placeables: in privatemines/mines/<type>.yml; the section's type:
-        key picks the implementation. Built-ins: hologram, entity, afk-block. Register in onEnable —
-        mines load per player join, after all plugins enabled)
+        ----------------------------------------------------------------------------
+        VariableService  (named reusable values — variables.yml + %pinnaprison_variable_<name>%)
+        ----------------------------------------------------------------------------
+        Two kinds (VariableType). STATIC = a global template resolved from PlaceholderAPI for the
+        reading player (a constant with no placeholders is resolved once and cached; dynamic ones can
+        opt into a short per-player cache-millis). CHANGEABLE = a per-player value stored in player
+        data, starting at the config default. All methods thread-safe.
+        boolean exists(String name)
+        boolean isStatic(String name) / boolean isChangeable(String name)
+        VariableType getType(String name)                       // STATIC | CHANGEABLE, null if unknown
+        VariableInfo getInfo(String name)                       // null if unknown
+        Set<String> getVariableNames()                          // configured + addon-registered
+        String getValue(Player player, String name)             // "" if unknown; player may be null
+        String getValue(UUID playerId, String name)
+        String get(UUID playerId, String name)                  // stored-or-default RAW value of a changeable
+        void set(UUID playerId, String name, String value)      // no-op unless it's a changeable
+        BigDecimal add(UUID playerId, String name, BigDecimal amount) // numeric changeables; returns the new value
+        void reset(UUID playerId, String name)                  // back to the config default
+        void registerStatic(String name, Function<Player, String> supplier) // a live computed variable with no config entry; survives reloads until unregister. Must be fast + side-effect free (called from async placeholder threads)
+        void unregister(String name)                            // addon-registered only; config variables untouched
+        VariableInfo record (iapi.data): (String name, VariableType type, boolean numeric, String raw)
+
+        ----------------------------------------------------------------------------
+        PlaceableService  (register custom mine placeable types — packet-based decorations /
+        interactables configured per mine type under placeables: in privatemines/mines/<type>.yml;
+        the section's type: key picks the implementation. Built-ins: hologram, entity, afk-block.
+        Register in onEnable — mines load per player join, after all plugins enabled)
+        ----------------------------------------------------------------------------
         void registerPlaceableType(String typeId, PlaceableFactory factory) // re-registering replaces (built-ins included)
         boolean isPlaceableTypeRegistered(String typeId)
         void registerClickable(int entityId, PlaceableClickHandler handler) // route clicks on a packet entity by edEntity.getId(); ids are server-global
@@ -429,28 +623,35 @@ module.exports = {
           // Netty thread, vanilla double-fire already de-duplicated; schedule a sync task before Bukkit API
         PlaceableClickType enum: LEFT, RIGHT
 
-        DisplayService: (PinnaPrison refreshes a persistent leveling action bar every couple of ticks, so
-        action-bar text you send yourself is overwritten almost immediately — route it through this instead)
-        void showActionbar(Player player, String text, long durationTicks) // one-shot message, suppresses the bar + overrides for that window; colors translated; any thread
+        ----------------------------------------------------------------------------
+        DisplayService  (PinnaPrison refreshes a persistent leveling action bar every couple of
+        ticks, so action-bar text you send yourself is overwritten almost immediately — route it
+        through this instead)
+        ----------------------------------------------------------------------------
+        void showActionbar(Player player, String text, long durationTicks) // one-shot message, suppresses the bar + overrides for that window; colours translated; any thread
         void registerActionbarOverride(String id, Function<Player, String> provider)
           // persistent override: while provider returns non-null for a player, its text replaces the leveling
           // bar, refreshed by PinnaPrison's own loop (no flicker). Provider runs ASYNC every few ticks for
           // EVERY online player — must be thread-safe + cheap: return a cached, pre-formatted string (legacy
-          // color codes, hex already translated). Return null to fall through. Same id re-register replaces;
-          // first registered provider returning non-null wins. Temporary showActionbar messages win over overrides
+          // colour codes, hex already translated). Return null to fall through. Same id re-register replaces;
+          // the first registered provider returning non-null wins. Temporary showActionbar messages win over overrides
         void unregisterActionbarOverride(String id)
         String id = your plugin name.
 
-        FormatService: (format/parse numbers with the server's format.yml notation so addon output matches
-        PinnaPrison's own lore/placeholders/menus. Suffixes config-driven: k, M, B, T, Qa, Qi, S, Sp, O, N,
-        D, ... up to 10^102. All thread-safe)
+        ----------------------------------------------------------------------------
+        FormatService  (format/parse numbers with the server's format.yml notation so addon output
+        matches PinnaPrison's own lore/placeholders/menus. Suffixes config-driven: k, M, B, T, Qa,
+        Qi, S, Sp, O, N, D, ... up to 10^102. All thread-safe)
+        ----------------------------------------------------------------------------
         String format(BigDecimal number)                        // server default notation (abbreviated or pretty)
         String formatAbbreviated(BigDecimal number)             // 100000 -> "100k", 2.5B, 100D
         String formatGrouped(BigDecimal number)                 // 100000 -> "100,000"
         BigDecimal parse(String input)                          // "100M" / "2.5B" / "1,000" / scientific -> number; null if invalid. Case-insensitive, inverse of formatAbbreviated
 
-        GuiService (es.edwardbelt.pinnaprison.iapi.gui): (PinnaPrison's config-driven GUI system guis/*.yml —
-        register your own custom-item types and reference them from any GUI config like the built-ins)
+        ----------------------------------------------------------------------------
+        GuiService (es.edwardbelt.pinnaprison.iapi.gui)  (PinnaPrison's config-driven GUI system
+        guis/*.yml — register your own custom-item types and reference them from any GUI config)
+        ----------------------------------------------------------------------------
         void registerItemType(String typeId, ApiGuiItemFactory factory) // typeId = the custom-item.type value; built-in ids win on collision; re-register replaces
         void unregisterItemType(String typeId)
         boolean guiExists(String guiId)                         // guis/<id>.yml loaded?
@@ -460,9 +661,9 @@ module.exports = {
         String getOpenGuiId(Player player)                      // null if none
         ApiGuiItemFactory (functional): ApiGuiItem create(ApiGuiItemContext context) // main thread, once per configured slot per render — keep cheap
         ApiGuiItem — controls one slot (all callbacks main thread):
-          ItemStack render()                                    // null hides the entry (filler shows)
+          ItemStack render()                                    // null hides the entry (the filler shows)
           default void onClick(ApiGuiClick click)               // click itself always cancelled; mutate inventory/cursor NEXT tick
-          default boolean allowsCursorInteraction()             // true = viewer can pick/place in their OWN inventory (drag-and-drop slots; read cursor via click.getCursor()); top window stays protected
+          default boolean allowsCursorInteraction()             // true = viewer can pick/place in their OWN inventory (drag-and-drop slots; read the cursor via click.getCursor()); the top window stays protected
           default boolean shouldShow()                          // false hides (on top of the config requirement)
         ApiGuiItemContext: Player getPlayer(); Map<String,String> getPlaceholders() (live {token} map);
           ConfigurationSection getCustomItemSection();
@@ -481,12 +682,15 @@ module.exports = {
         PinnaPrisonEvent (abstract extends org.bukkit.event.Event) — auto async-detected. If
           isAsynchronous() is true, DO NOT touch the Bukkit world/entities in the listener; schedule a task.
         PinnaPlayerEvent (abstract extends PinnaPrisonEvent) — Player getPlayer(), UUID getPlayerId()
-        Every event has the usual static HandlerList getHandlerList() and HandlerList getHandlers().
+        Every event has the usual static HandlerList getHandlerList() and HandlerList getHandlers(),
+        plus a static hasListeners() helper.
 
-        BlockMineEvent (Cancellable) — a manual single-block dig, before removal/rewards (async, Netty thread)
-          Vector getPosition(), Material getMaterial()  // cancel = restore block client-side + no rewards
+        BlockMineEvent (Cancellable) — a single block dug in a mine, before removal/rewards (async:
+          the Netty mining thread for manual swings, the AFK-block timer thread for AFK breaks)
+          Vector getPosition(), Material getMaterial(), boolean isAfkBlock()
+          // cancel = skip the block and all its rewards (a cancelled manual break also restores it client-side)
         EnchantProcEvent (Cancellable) — an enchant procs, before its effect (async)
-          String getEnchantId(), EnchantData getData()  // cancel = skip the effect
+          String getEnchantId(), EnchantData getData(), boolean isAfkBlock()  // cancel = skip the effect
         EnchantPrestigeEvent — String getEnchantId(), int getNewPrestige()
         BlocksBrokenEvent — after a bulk break paid out (usually async)
           enum Source { ENCHANT, BOMB, DRILL, AUTOMINER, OTHER }; Source getSource(), String getSourceId(), int getBlocksBroken()
@@ -505,6 +709,21 @@ module.exports = {
         BoosterActivateEvent (Cancellable) — String getEconomy(), boolean isEnchantBooster(), double getMultiplier(), long getDurationMillis()
         PickaxeSkinPurchaseEvent (Cancellable, PinnaPlayerEvent) — the built-in money purchase in the
           pickaxe-skins GUI (cancel to run your own unlock flow); String getSkinId(), String getCurrency(), BigDecimal getAmount()
+
+        Powerup events (PinnaPlayerEvent; the player is always the MINE OWNER — powerups are owner-only):
+        PowerupSpawnEvent (Cancellable) — a powerup is about to materialise, right after its multiplier
+          was rolled. Usually async (the interval spawner is an async timer).
+          String getPowerupId(), String getPowerupName(), boolean hasBoost(), String getBoostEconomy(),
+          boolean isEnchantBoost(), Location getLocation() (a copy),
+          double getMultiplier() / void setMultiplier(double)          // retune the roll ("Lucky Roll" perk)
+          long getDurationSeconds() / void setDurationSeconds(long)
+          boolean isAutoClaim()  / void setAutoClaim(boolean)          // true = claimed for the owner instantly, no head shown ("Auto Claim" perk)
+        PowerupClaimEvent (Cancellable) — right before the boost is granted and actions-on-claim run.
+          Main thread for walk-over claims; the calling thread for API/auto claims.
+          Same getters plus boolean isAutoClaimed(); setMultiplier / setDurationSeconds retune the boost
+          before it lands (a "Double Boost" perk is one setMultiplier call).
+        PowerupDespawnEvent — a powerup timed out unclaimed (not fired for claims/forced removals). Async.
+          String getPowerupId(), String getPowerupName(), Location getLocation()
 
         Gang events — GangEvent (abstract base, extends PinnaPrisonEvent): UUID getGangId(), String getGangName().
         All below extend GangEvent except GangCreateEvent (no gang exists yet — extends PinnaPrisonEvent directly):
@@ -526,23 +745,35 @@ module.exports = {
         A custom enchant has TWO parts:
         1) BEHAVIOUR (your Java): implement APIEnchant#onProc and register it.
         2) CONFIG (a yaml file): plugins/PinnaPrison/enchants/<id>.yml with type: api — this defines
-           chance, level, cost, prestige, display name, material, requirement. WITHOUT this file the
-           enchant does not exist in-game (can't be bought, never rolls a chance).
+           chance, level, cost, prestige, display name, material, requirement, cooldown and your own
+           settings: block. WITHOUT this file the enchant does not exist in-game (it can't be bought
+           and never rolls a chance).
 
         APIEnchant interface: es.edwardbelt.pinnaprison.iapi.enchant
         void onProc(Player player, EnchantData data)   // runs when the enchant procs
-        default boolean asyncSafe()                     // default false
-          - false (default): onProc is dispatched to the MAIN thread. Use if it touches the Bukkit
-            world, real entities or inventories.
-          - true: onProc runs on the async break thread (max throughput). Use ONLY if onProc does
+        default boolean asyncSafe()                     // default false — ALWAYS override it to true for a mine enchant
+          - false (default): onProc is dispatched to the MAIN thread. Only use this if it touches the
+            Bukkit world, real entities or inventories.
+          - true: onProc runs on the async break thread (max throughput). Correct whenever onProc does
             purely packet/data work: the MineService break methods, EdLib packet entities, currency
-            changes, and per-player particles/sounds. This is what animated mine enchants should use.
+            changes, per-player particles/sounds. This is what every animated mine enchant should use.
 
-        EnchantData interface: es.edwardbelt.pinnaprison.iapi.enchant.data — marker for trigger context.
+        EnchantData interface: es.edwardbelt.pinnaprison.iapi.enchant.data — the trigger context.
+          default String getChainSource()                    // the enchant id that chain-triggered this proc, or null for a normal proc
+          default Map<String,String> getChainVariables()     // variables the chain source exposed (e.g. "amount" from a greed enchant); empty for normal procs
         BlockBreakEnchantData class (implements EnchantData): the normal mining trigger.
-          Vector getPosition()   // the mined block position (mine-world coords)
+          Vector getPosition()   // the mined block position (mine-world block coords)
           Material getMaterial() // the mined block type
-        Always: if (!(data instanceof BlockBreakEnchantData hit)) return;
+          boolean isAfkBlock()   // true when this break came from the player's AFK block session, not a manual swing
+          BlockBreakEnchantData chained(String source, Map<String,String> variables) // a copy tagged as a chained proc
+        Always start onProc with: if (!(data instanceof BlockBreakEnchantData hit)) return;
+
+        CHAINING (combo enchants): any enchant's yaml can carry \`chain: <sourceEnchantId>\` (or
+        \`chain: { enchant: <id> }\`). A chained enchant no longer procs on block breaks — instead its
+        own chance is rolled every time the source enchant procs, and it receives an EnchantData whose
+        getChainSource() is the source id and whose getChainVariables() carry what the source exposed.
+        Your API enchant needs no code for this; it just works. Read getChainVariables() if you want
+        to scale off the source's payout.
 
         EnchantRegions (es.edwardbelt.pinnaprison.iapi.enchant.EnchantRegions) — pure-math block sets,
         thread-safe, feed them to MineService#breakBlocks:
@@ -556,57 +787,156 @@ module.exports = {
             PinnaPrisonAPI api = PinnaPrisonAPI.getInstance();
             if (api == null) { getLogger().severe("PinnaPrison not enabled!"); return; }
             api.getEnchants().registerEnchant("explosion", new ExplosionEnchant());
-            api.getEnchants().registerEnchant("comet", new CometEnchant(this));
+            api.getEnchants().registerEnchant("comet", new CometEnchant());
         }
         \`\`\`
         Registration survives /pinna reload (the yaml is re-read each time).
 
         ----------------------------------------------------------------------------
-        EXAMPLE 1 — Explosion (simple, packet-only, asyncSafe)
+        THE FX HELPER — copy this class into every addon you write
+        ----------------------------------------------------------------------------
+        Particles and sounds are per-player packets: they must be sent to every mine viewer, each
+        one gated on their own /settings toggle, and they are safe to send from the async proc
+        thread. Never write a bare player.spawnParticle in an enchant — go through a helper like
+        this so no toggle is ever forgotten.
+        \`\`\`java
+        package com.example.util;
+
+        import es.edwardbelt.pinnaprison.iapi.PinnaPrisonAPI;
+        import es.edwardbelt.pinnaprison.iapi.service.EnchantService;
+        import es.edwardbelt.pinnaprison.iapi.service.MineService;
+        import org.bukkit.Color;
+        import org.bukkit.Location;
+        import org.bukkit.Particle;
+        import org.bukkit.Sound;
+        import org.bukkit.World;
+        import org.bukkit.entity.Player;
+        import org.bukkit.util.Vector;
+
+        /** Per-viewer, toggle-aware, fully async FX for mine enchants. */
+        public final class Fx {
+
+            private Fx() {}
+
+            private static MineService mines()      { return PinnaPrisonAPI.getInstance().getMines(); }
+            private static EnchantService enchants() { return PinnaPrisonAPI.getInstance().getEnchants(); }
+
+            /** The digger + co-op members + visitors of the mine the player is in. */
+            public static Iterable<Player> audience(Player player) {
+                return mines().getMineViewers(player);
+            }
+
+            /** A block position turned into the centre of that block, in the mines world. */
+            public static Location at(World world, Vector pos) {
+                return new Location(world, pos.getX(), pos.getY(), pos.getZ());
+            }
+            public static Vector center(Vector blockPos) {
+                return new Vector(blockPos.getBlockX() + 0.5, blockPos.getBlockY() + 0.5, blockPos.getBlockZ() + 0.5);
+            }
+
+            /** Particles to every mine viewer who has NOT muted particles. Safe on any thread. */
+            public static void particle(Player player, World world, Particle particle, Vector pos,
+                                        int count, double spread, double speed) {
+                Location location = at(world, pos);
+                for (Player viewer : audience(player)) {
+                    if (!viewer.isOnline()) continue;
+                    if (enchants().isParticlesDisabled(viewer.getUniqueId())) continue;   // RULE 4
+                    viewer.spawnParticle(particle, location, count, spread, spread, spread, speed);
+                }
+            }
+
+            /** Coloured dust particles (a trail colour read from the enchant's settings). */
+            public static void dust(Player player, World world, Vector pos, Color color, float size, int count, double spread) {
+                Location location = at(world, pos);
+                Particle.DustOptions options = new Particle.DustOptions(color, size);
+                for (Player viewer : audience(player)) {
+                    if (!viewer.isOnline()) continue;
+                    if (enchants().isParticlesDisabled(viewer.getUniqueId())) continue;
+                    viewer.spawnParticle(Particle.REDSTONE, location, count, spread, spread, spread, 0, options);
+                }
+            }
+
+            /** A straight particle line — great for beams/lasers between two points. */
+            public static void line(Player player, World world, Vector from, Vector to, Particle particle, double step) {
+                Vector delta = to.clone().subtract(from);
+                double length = delta.length();
+                if (length < 1.0E-4) return;
+                Vector unit = delta.multiply(1 / length);
+                for (double d = 0; d <= length; d += step) {
+                    particle(player, world, particle, from.clone().add(unit.clone().multiply(d)), 1, 0, 0);
+                }
+            }
+
+            /** Sound to every mine viewer who has NOT muted sounds. Safe on any thread. */
+            public static void sound(Player player, World world, Sound sound, Vector pos, float volume, float pitch) {
+                Location location = at(world, pos);
+                for (Player viewer : audience(player)) {
+                    if (!viewer.isOnline()) continue;
+                    if (enchants().isSoundsDisabled(viewer.getUniqueId())) continue;      // RULE 4
+                    viewer.playSound(location, sound, volume, pitch);
+                }
+            }
+        }
+        \`\`\`
+
+        ----------------------------------------------------------------------------
+        EXAMPLE 1 — Explosion (simple, packet-only, asyncSafe, fully config-driven)
         ----------------------------------------------------------------------------
         \`\`\`java
+        package com.example.enchants;
+
+        import com.example.util.Fx;
         import es.edwardbelt.pinnaprison.iapi.PinnaPrisonAPI;
         import es.edwardbelt.pinnaprison.iapi.enchant.APIEnchant;
-        import es.edwardbelt.pinnaprison.iapi.enchant.EnchantRegions;
         import es.edwardbelt.pinnaprison.iapi.enchant.data.BlockBreakEnchantData;
         import es.edwardbelt.pinnaprison.iapi.enchant.data.EnchantData;
         import es.edwardbelt.pinnaprison.iapi.service.EnchantService;
         import es.edwardbelt.pinnaprison.iapi.service.MineService;
         import org.bukkit.Particle;
         import org.bukkit.Sound;
+        import org.bukkit.World;
+        import org.bukkit.configuration.ConfigurationSection;
         import org.bukkit.entity.Player;
         import org.bukkit.util.Vector;
 
         public class ExplosionEnchant implements APIEnchant {
-            @Override public boolean asyncSafe() { return true; } // packets + data only
 
-            @Override public void onProc(Player player, EnchantData data) {
+            private static final String ID = "explosion";
+
+            @Override public boolean asyncSafe() { return true; } // packets + data only — RULE 1
+
+            @Override
+            public void onProc(Player player, EnchantData data) {
                 if (!(data instanceof BlockBreakEnchantData hit)) return;
+
                 PinnaPrisonAPI api = PinnaPrisonAPI.getInstance();
                 MineService mines = api.getMines();
                 EnchantService enchants = api.getEnchants();
-                Vector center = hit.getPosition().clone().add(new Vector(0.5, 0.5, 0.5));
+                World world = mines.getMinesWorld();
+                Vector center = Fx.center(hit.getPosition());
 
-                // Read the radius from the enchant's settings: block (admin-tunable). Default 3.
-                org.bukkit.configuration.ConfigurationSection settings = enchants.getSettings("explosion");
-                double radius = settings == null ? 3 : settings.getDouble("radius", 3);
+                // RULE 7: everything tunable comes from settings:, read fresh so /pinna reload applies.
+                ConfigurationSection settings = enchants.getSettings(ID);
+                double radius        = settings == null ? 3    : settings.getDouble("radius", 3);
+                boolean blockCurr    = settings == null ? false : settings.getBoolean("affect-block-currencies", false);
+                boolean autosell     = settings == null ? true  : settings.getBoolean("affect-autosell", true);
+                boolean tokenGreed   = settings == null ? true  : settings.getBoolean("affect-tokengreed", true);
 
-                // Break + pay a sphere exactly like mining: blockCurrencies OFF, autosell ON, tokenGreed ON.
-                int broken = mines.breakSphere(player, center, radius, false, true, true);
+                // Scale with the level, again from config (RULE 7).
+                double perLevel = settings == null ? 0 : settings.getDouble("radius-per-level", 0);
+                radius += perLevel * enchants.getLevel(player.getUniqueId(), ID).doubleValue();
+
+                // RULE 8 + RULE 4: MineService pays exactly like mining and already honours the
+                // player's Virtual Block Breaking toggle — nothing extra to do here.
+                int broken = mines.breakSphere(player, center, radius, blockCurr, autosell, tokenGreed);
                 if (broken <= 0) return;
 
-                // Per-player FX, only the digger, only if they haven't muted them in /settings.
-                if (!enchants.isSoundsDisabled(player.getUniqueId()))
-                    player.playSound(toLoc(player, center), Sound.ENTITY_GENERIC_EXPLODE, 1f, 0.8f);
-                if (!enchants.isParticlesDisabled(player.getUniqueId()))
-                    player.spawnParticle(Particle.EXPLOSION_LARGE, toLoc(player, center), 3, 1, 1, 1, 0);
+                // RULE 2 + 6: async packets, whole mine, per-viewer toggles (all inside Fx).
+                Fx.particle(player, world, Particle.EXPLOSION_LARGE, center, 3, 1, 0);
+                Fx.sound(player, world, Sound.ENTITY_GENERIC_EXPLODE, center, 1f, 0.8f);
 
-                // The configurable proc message (set proc-message in the yaml); honours mute toggles.
-                enchants.sendProcMessage(player, "explosion", "{blocks}", String.valueOf(broken));
-            }
-
-            private org.bukkit.Location toLoc(Player p, Vector v) {
-                return new org.bukkit.Location(PinnaPrisonAPI.getInstance().getMines().getMinesWorld(), v.getX(), v.getY(), v.getZ());
+                // RULE 4: the configurable proc message; handles both message mute toggles for you.
+                enchants.sendProcMessage(player, ID, "{blocks}", String.valueOf(broken));
             }
         }
         \`\`\`
@@ -616,66 +946,92 @@ module.exports = {
         ----------------------------------------------------------------------------
         \`\`\`java
         public class JackhammerEnchant implements APIEnchant {
+
+            private static final String ID = "jackhammer";
+
             @Override public boolean asyncSafe() { return true; }
-            @Override public void onProc(Player player, EnchantData data) {
+
+            @Override
+            public void onProc(Player player, EnchantData data) {
                 if (!(data instanceof BlockBreakEnchantData hit)) return;
-                PinnaPrisonAPI.getInstance().getMines()
-                    .breakLayer(player, hit.getPosition().getBlockY(), false, true, true);
+                PinnaPrisonAPI api = PinnaPrisonAPI.getInstance();
+                var settings = api.getEnchants().getSettings(ID);
+                int extraLayers = settings == null ? 0 : settings.getInt("extra-layers", 0);
+
+                int y = hit.getPosition().getBlockY();
+                int broken = 0;
+                for (int layer = y; layer <= y + extraLayers; layer++) {
+                    broken += api.getMines().breakLayer(player, layer, false, true, true);
+                }
+                if (broken > 0) api.getEnchants().sendProcMessage(player, ID, "{blocks}", String.valueOf(broken));
             }
         }
         \`\`\`
 
         ----------------------------------------------------------------------------
-        EXAMPLE 3 — Currency reward enchant, fully config-driven (settings: + proc-message)
+        EXAMPLE 3 — Currency reward enchant (settings: + proc-message + chain variables)
         ----------------------------------------------------------------------------
-        Reads the currency id and the (math + PlaceholderAPI aware, {level}-substituted) amount from
-        the enchant's settings: block, then sends the configurable proc-message. NOTHING is hardcoded —
-        the admin tunes the currency, amount and message in the yaml.
+        Reads the currency id and a {level}-substituted amount from settings:, pays it BOOSTED, and
+        sends the configurable proc-message. Nothing is hardcoded — the admin tunes the currency,
+        the amount and the message in the yaml.
         \`\`\`java
+        package com.example.enchants;
+
         import es.edwardbelt.pinnaprison.iapi.PinnaPrisonAPI;
         import es.edwardbelt.pinnaprison.iapi.enchant.APIEnchant;
         import es.edwardbelt.pinnaprison.iapi.enchant.data.EnchantData;
         import es.edwardbelt.pinnaprison.iapi.service.CurrencyService;
         import es.edwardbelt.pinnaprison.iapi.service.EnchantService;
+        import es.edwardbelt.pinnaprison.iapi.service.FormatService;
         import org.bukkit.configuration.ConfigurationSection;
         import org.bukkit.entity.Player;
         import java.math.BigDecimal;
         import java.util.UUID;
 
         public class GreedEnchant implements APIEnchant {
+
             private final String id;
-            public GreedEnchant(String id) { this.id = id; }  // e.g. registerEnchant("tokengreed", new GreedEnchant("tokengreed"))
+            public GreedEnchant(String id) { this.id = id; } // registerEnchant("tokengreed", new GreedEnchant("tokengreed"))
 
             @Override public boolean asyncSafe() { return true; } // pure data
 
-            @Override public void onProc(Player player, EnchantData data) {
+            @Override
+            public void onProc(Player player, EnchantData data) {
                 PinnaPrisonAPI api = PinnaPrisonAPI.getInstance();
                 EnchantService enchants = api.getEnchants();
                 CurrencyService currencies = api.getCurrencies();
+                FormatService format = api.getFormat();
                 UUID uuid = player.getUniqueId();
 
-                // Read this enchant's custom config from its settings: block (reloaded by /pinna reload).
                 ConfigurationSection settings = enchants.getSettings(id);
                 if (settings == null) return;
-                String currency = settings.getString("currency", "tokens");
+                String currency   = settings.getString("currency", "tokens");
                 String amountExpr = settings.getString("amount", "1000 + {level}");
 
-                // {level} + math + PlaceholderAPI -> a number. (Parse however you like; here a simple eval.)
                 BigDecimal level = enchants.getLevel(uuid, id);
-                BigDecimal amount = evaluate(amountExpr.replace("{level}", level.toPlainString()), player);
+                BigDecimal amount = evaluate(amountExpr.replace("{level}", level.toPlainString()));
 
-                currencies.addBalanceBoosted(uuid, currency, amount); // boosted = respects booster/crystal/rebirth
-                // The configurable proc message: set proc-message in the yaml; this honours mute toggles for you.
-                enchants.sendProcMessage(player, id, "{amount}", amount.toPlainString(), "{currency}", currency);
+                // A chained proc can scale off whatever the source enchant exposed (e.g. its blocks).
+                String chainBlocks = data.getChainVariables().get("blocks");
+                if (chainBlocks != null) {
+                    try { amount = amount.multiply(new BigDecimal(chainBlocks)); } catch (NumberFormatException ignored) {}
+                }
+
+                // ALWAYS the boosted add for a reward: boosters, crystals, rebirth, gang all apply.
+                currencies.addBalanceBoosted(uuid, currency, amount);
+
+                // format() makes the number read exactly like PinnaPrison's own lore/placeholders.
+                enchants.sendProcMessage(player, id,
+                        "{amount}", format.format(amount),
+                        "{currency}", currencies.getDisplayName(currency));
             }
 
-            // Use your own math/PAPI evaluation; PinnaPrison's notation placeholders also work in the message.
-            private BigDecimal evaluate(String expr, Player player) {
+            private BigDecimal evaluate(String expr) {
                 try { return new BigDecimal(expr.trim()); } catch (Exception e) { return BigDecimal.ZERO; }
             }
         }
         \`\`\`
-        Its settings: block in the yaml (see the HOW TO ADD section) would be e.g.:
+        Its yaml would carry:
         \`\`\`yaml
         proc-message: '&6Greed! &e+{amount} {currency}'
         settings:
@@ -686,11 +1042,22 @@ module.exports = {
         ----------------------------------------------------------------------------
         EXAMPLE 4 — Comet (animated EdLib entity + impact) — the showpiece
         ----------------------------------------------------------------------------
-        A burning falling block streaks down and slams into the mine, blasting a sphere. It uses the
-        EdLib entity + a move goal; the goal's per-tick runnable spawns the trail and the end runnable
-        does the impact. spawnInMine shows it to the whole mine; despawnInMine cleans it up.
+        A burning falling block streaks down and slams into the mine, blasting a sphere. It shows the
+        difference between doing this right and wrong:
+          - the entity is created and spawned ASYNC (rule 1) and shown with spawnInMine (rule 3),
+          - movement is a GOAL, not a manual timer,
+          - the trail particles go to every mine viewer, gated per viewer (rules 2 + 6),
+          - a floating text display announces the hit (displays are never hidden by the mob toggle),
+          - a fail-safe despawn runs even if the player logs out mid-flight (rule 9),
+          - every number comes from settings: (rule 7).
         \`\`\`java
+        package com.example.enchants;
+
+        import com.example.util.Fx;
         import es.edwardbelt.edlib.iapi.EdLibAPI;
+        import es.edwardbelt.edlib.iapi.EdColor;
+        import es.edwardbelt.edlib.iapi.entity.BillboardMode;
+        import es.edwardbelt.edlib.iapi.entity.EdEntity;
         import es.edwardbelt.edlib.iapi.entity.EdFallingBlock;
         import es.edwardbelt.edlib.iapi.entity.goal.impl.EdGoalMove;
         import es.edwardbelt.pinnaprison.iapi.PinnaPrisonAPI;
@@ -699,48 +1066,191 @@ module.exports = {
         import es.edwardbelt.pinnaprison.iapi.enchant.data.EnchantData;
         import es.edwardbelt.pinnaprison.iapi.service.EnchantService;
         import es.edwardbelt.pinnaprison.iapi.service.MineService;
-        import org.bukkit.*;
+        import org.bukkit.Location;
+        import org.bukkit.Material;
+        import org.bukkit.Particle;
+        import org.bukkit.Sound;
+        import org.bukkit.World;
+        import org.bukkit.configuration.ConfigurationSection;
         import org.bukkit.entity.EntityType;
         import org.bukkit.entity.Player;
         import org.bukkit.util.Vector;
 
+        import java.util.List;
+
         public class CometEnchant implements APIEnchant {
-            @Override public boolean asyncSafe() { return true; } // entities, goals and breaks are packets
 
-            @Override public void onProc(Player player, EnchantData data) {
+            private static final String ID = "comet";
+
+            @Override public boolean asyncSafe() { return true; } // entities, goals and breaks are all packets
+
+            @Override
+            public void onProc(Player player, EnchantData data) {
                 if (!(data instanceof BlockBreakEnchantData hit)) return;
+
+                PinnaPrisonAPI api = PinnaPrisonAPI.getInstance();
                 EdLibAPI edlib = EdLibAPI.getInstance();
-                MineService mines = PinnaPrisonAPI.getInstance().getMines();
-                EnchantService enchants = PinnaPrisonAPI.getInstance().getEnchants();
+                MineService mines = api.getMines();
+                EnchantService enchants = api.getEnchants();
                 World world = mines.getMinesWorld();
+                if (world == null) return;
 
-                Vector impact = hit.getPosition().clone().add(new Vector(0.5, 0.5, 0.5));
-                Vector spawn = impact.clone().add(new Vector(0, 16, 0));
+                // RULE 7 — every knob is admin-tunable, read fresh each proc.
+                ConfigurationSection s = enchants.getSettings(ID);
+                double radius     = s == null ? 3.0  : s.getDouble("crater-radius", 3.0);
+                double speed      = s == null ? 1.4  : s.getDouble("fall-speed", 1.4);
+                double height     = s == null ? 16   : s.getDouble("spawn-height", 16);
+                String blockName  = s == null ? "MAGMA_BLOCK" : s.getString("block", "MAGMA_BLOCK");
+                boolean blockCurr = s != null && s.getBoolean("affect-block-currencies", false);
+                boolean autosell  = s == null || s.getBoolean("affect-autosell", true);
+                boolean greed     = s == null || s.getBoolean("affect-tokengreed", true);
+                long failSafe     = s == null ? 200L : s.getLong("failsafe-ticks", 200L);
 
+                Material blockMaterial = Material.matchMaterial(blockName);
+                if (blockMaterial == null) blockMaterial = Material.MAGMA_BLOCK;
+
+                Vector impact = Fx.center(hit.getPosition());
+                Vector spawn  = impact.clone().add(new Vector(0, height, 0));
+
+                // RULE 1 — created and spawned straight off the async proc thread. No sync hop.
                 EdFallingBlock comet = (EdFallingBlock) edlib.createEntity(EntityType.FALLING_BLOCK,
                         new Location(world, spawn.getX(), spawn.getY(), spawn.getZ()));
-                comet.setFallingBlock(Material.MAGMA_BLOCK);
-                comet.setGravity(false);            // driven by the goal
-                mines.spawnInMine(player, comet);   // visible to everyone in the mine
+                if (comet == null) return;
+                comet.setFallingBlock(blockMaterial);
+                comet.setGravity(false);                 // the goal drives it
+                comet.setGlowing(EdColor.GOLD);          // one of the 16 CHAT colours only — see the GLOWING WARNING
+                comet.setInFire(true);
 
-                EdGoalMove fall = new EdGoalMove(impact, 1.4); // fly to impact at 1.4 blocks/tick
+                // RULE 3 — the whole mine sees it; viewers who muted enchant mobs are skipped for us.
+                mines.spawnInMine(player, comet);
+
+                EdGoalMove fall = new EdGoalMove(impact, speed);
+
+                // RULE 2 + 6 — the trail, sent to every viewer that wants particles, from the goal thread.
                 fall.setEachTickRunnable(() -> {
-                    if (enchants.isParticlesDisabled(player.getUniqueId())) return;
                     Vector p = comet.getPosition();
-                    player.spawnParticle(Particle.FLAME, p.getX(), p.getY(), p.getZ(), 4, 0.2, 0.2, 0.2, 0);
+                    Fx.particle(player, world, Particle.FLAME, p, 4, 0.2, 0.0);
+                    Fx.particle(player, world, Particle.SMOKE_LARGE, p, 2, 0.15, 0.01);
                 });
+
                 fall.setEndRunnable(() -> {
-                    mines.despawnInMine(player, comet); // untrack + despawn
-                    int broken = mines.breakSphere(player, impact, 3, false, true, true);
-                    if (!enchants.isSoundsDisabled(player.getUniqueId()))
-                        player.playSound(new Location(world, impact.getX(), impact.getY(), impact.getZ()),
-                                Sound.ENTITY_GENERIC_EXPLODE, 1f, 0.8f);
-                    if (broken > 0) player.sendMessage("§6☄ Comet smashed §e" + broken + " §6blocks!");
+                    mines.despawnInMine(player, comet);          // RULE 3 — never entity.remove()
+
+                    int broken = mines.breakSphere(player, impact, radius, blockCurr, autosell, greed);
+
+                    Fx.particle(player, world, Particle.EXPLOSION_LARGE, impact, 4, 1.0, 0.0);
+                    Fx.sound(player, world, Sound.ENTITY_GENERIC_EXPLODE, impact, 1f, 0.8f);
+
+                    if (broken > 0) {
+                        floatingText(player, world, impact.clone().add(new Vector(0, 2, 0)),
+                                "§6§l☄ §e" + broken + " blocks", 40L);
+                        enchants.sendProcMessage(player, ID, "{blocks}", String.valueOf(broken));
+                    }
                 });
+
                 comet.addGoal(fall);
 
-                // Fail-safe: if the player leaves mid-flight, despawn the comet after ~6s.
-                EdLibAPI.getExecutor().asyncLater(() -> mines.despawnInMine(player, comet), 120, "comet-cleanup");
+                // RULE 9 — fail-safe: if the player logs out or leaves the mine mid-flight the goal's
+                // endRunnable may never run, so untrack + despawn unconditionally a bit later.
+                EdLibAPI.getExecutor().asyncLater(
+                        () -> mines.despawnInMine(player, comet), failSafe, "comet-cleanup");
+            }
+
+            /** A short-lived floating text display. Displays are NEVER hidden by the mob-entities toggle. */
+            private void floatingText(Player player, World world, Vector pos, String text, long ticks) {
+                MineService mines = PinnaPrisonAPI.getInstance().getMines();
+                EdEntity display = EdLibAPI.getInstance().createEntity(EntityType.TEXT_DISPLAY,
+                        new Location(world, pos.getX(), pos.getY(), pos.getZ()));
+                if (display == null) return;
+                display.setBillboard(BillboardMode.CENTER);   // always faces the viewer — call BEFORE spawn
+                display.setBackground(0);                     // fully transparent background
+                display.setTextShadow(true);
+                display.setSeeThrough(false);
+                display.setTeleportDuration(3);               // any tp glides instead of snapping
+                display.setText(List.of(text));
+                // enchantMob=false: a text display is not a "mob", and this keeps the intent explicit.
+                mines.spawnInMine(player, display, false);
+                EdLibAPI.getExecutor().asyncLater(
+                        () -> mines.despawnInMine(player, display), ticks, "comet-text");
+            }
+        }
+        \`\`\`
+
+        ----------------------------------------------------------------------------
+        EXAMPLE 5 — Ice Age (fake blocks) — the ONE case where you must handle
+        Virtual Block Breaking yourself
+        ----------------------------------------------------------------------------
+        Freezes a region to ICE for a moment, then shatters it. Because the animation lied to the
+        client about the blocks, it MUST reveal them again: after a normal break the chunk resend
+        clears the lie for free, but with Virtual Block Breaking on nothing is broken and no resend
+        happens, so the ice would stay forever. \`revealBlocks\` is safe to call either way, so just
+        always call it.
+        \`\`\`java
+        package com.example.enchants;
+
+        import com.example.util.Fx;
+        import es.edwardbelt.edlib.iapi.EdLibAPI;
+        import es.edwardbelt.pinnaprison.iapi.PinnaPrisonAPI;
+        import es.edwardbelt.pinnaprison.iapi.enchant.APIEnchant;
+        import es.edwardbelt.pinnaprison.iapi.enchant.EnchantRegions;
+        import es.edwardbelt.pinnaprison.iapi.enchant.data.BlockBreakEnchantData;
+        import es.edwardbelt.pinnaprison.iapi.enchant.data.EnchantData;
+        import es.edwardbelt.pinnaprison.iapi.service.EnchantService;
+        import es.edwardbelt.pinnaprison.iapi.service.MineService;
+        import org.bukkit.Material;
+        import org.bukkit.Particle;
+        import org.bukkit.Sound;
+        import org.bukkit.World;
+        import org.bukkit.configuration.ConfigurationSection;
+        import org.bukkit.entity.Player;
+        import org.bukkit.util.Vector;
+
+        import java.util.List;
+        import java.util.Set;
+
+        public class IceAgeEnchant implements APIEnchant {
+
+            private static final String ID = "iceage";
+
+            @Override public boolean asyncSafe() { return true; }
+
+            @Override
+            public void onProc(Player player, EnchantData data) {
+                if (!(data instanceof BlockBreakEnchantData hit)) return;
+
+                PinnaPrisonAPI api = PinnaPrisonAPI.getInstance();
+                MineService mines = api.getMines();
+                EnchantService enchants = api.getEnchants();
+                World world = mines.getMinesWorld();
+
+                ConfigurationSection s = enchants.getSettings(ID);
+                double radius   = s == null ? 4     : s.getDouble("radius", 4);
+                long freezeTicks = s == null ? 30L  : s.getLong("freeze-ticks", 30L);
+                String iceName  = s == null ? "BLUE_ICE" : s.getString("freeze-block", "BLUE_ICE");
+                Material ice = Material.matchMaterial(iceName);
+                if (ice == null) ice = Material.BLUE_ICE;
+
+                Vector center = Fx.center(hit.getPosition());
+                Set<Vector> region = EnchantRegions.sphere(hit.getPosition(), radius);
+
+                // Lie to the clients. Returns EXACTLY what was disguised.
+                List<Vector> frozen = mines.disguiseBlocks(player, region, ice);
+                if (frozen.isEmpty()) return;
+
+                Fx.particle(player, world, Particle.SNOWFLAKE, center, 40, radius / 2, 0.02);
+                Fx.sound(player, world, Sound.BLOCK_GLASS_BREAK, center, 1f, 0.6f);
+
+                EdLibAPI.getExecutor().asyncLater(() -> {
+                    int broken = mines.breakBlocks(player, frozen, false, true, true);
+
+                    // ALWAYS lift the disguise. Under Virtual Block Breaking nothing was broken and no
+                    // chunk resend happened, so without this the ice would linger on the client.
+                    mines.revealBlocks(player, frozen);
+
+                    Fx.particle(player, world, Particle.BLOCK_CRACK, center, 60, radius / 2, 0.1);
+                    Fx.sound(player, world, Sound.BLOCK_AMETHYST_BLOCK_BREAK, center, 1f, 1.4f);
+                    if (broken > 0) enchants.sendProcMessage(player, ID, "{blocks}", String.valueOf(broken));
+                }, freezeTicks, "iceage-shatter");
             }
         }
         \`\`\`
@@ -750,20 +1260,29 @@ module.exports = {
         ============================================================================
         EdLibAPI interface: es.edwardbelt.edlib.iapi
         Static: void setInstance(EdLibAPI), EdLibAPI getInstance()
-                TaskExecutor getExecutor(), void setExecutor(TaskExecutor)  // scheduler (see SCHEDULING below)
+                TaskExecutor getExecutor(), void setExecutor(TaskExecutor)  // scheduler (see SCHEDULING)
         Instance:
         EdModel getModel(String modelId)
-        EdEntity createEntity(EntityType type, Location location)
-        EdNPC createNPC(Location location, String name, String skinTexture, String skinSignature) // packet player NPC
+        EdEntity createEntity(EntityType type, Location location)   // ANY entity type, incl. TEXT_DISPLAY / BLOCK_DISPLAY / ITEM_DISPLAY; cast to EdFallingBlock / EdPrimedTNT / EdEntityVariantable where relevant. Returns null if the type can't be built.
+        EdNPC createNPC(Location location, String name, String skinTexture, String skinSignature) // packet player NPC (profile name capped at 16 chars)
         EdEntity createInteractionEntity(Location location, float height, float width) // note: height BEFORE width
         EdEntity createBlockDisplay(Location location, Matrix4f transformation, Material material)
-        EdEntity createItemDisplay(Location location, Matrix4f transformation, String itemData, int[] customModelData, String nbtData)
+        EdEntity createItemDisplay(Location location, Matrix4f transformation, String skinTexture, int[] profileUuid, String profileName)
+          // ^ this overload builds an item display holding a CUSTOM PLAYER HEAD: skinTexture is the
+          //   base64 "textures" value, profileUuid an int[4] uuid, profileName the profile name.
+          //   For a normal item, spawn createEntity(EntityType.ITEM_DISPLAY, loc) instead.
         EdWorld createWorld()
-        void sendActionbar(Player player, String message)
+        // --- optional-plugin integrations (all safe to call blindly; they report "not installed") ---
+        boolean isModelEngineEnabled()
+        EdModelEngineEntity createModelEngineEntity(String modelId, Location location) // null when ModelEngine isn't installed or the model id is unknown
+        float[] getModelEngineHitbox(String modelId)     // [width, height] in blocks, or null
+        boolean isMythicMobsEnabled()
+        EdMythicMobInfo getMythicMobInfo(String mobName) // resolve a MythicMobs definition WITHOUT spawning it; null if not installed / unknown
+        void sendActionbar(Player player, String message)   // inside PinnaPrison prefer DisplayService
         void sendXPBar(Player player, float progress, int level)
         void hidePlayer(Player viewer, Player target)
         void showPlayer(Player viewer, Player target)
-        void sendBlocks(Player player, Map<Vector, Material> blocks)
+        void sendBlocks(Player player, Map<Vector, Material> blocks) // raw fake blocks; inside a mine prefer MineService#disguiseBlocks
         void sendBossBar(Player player, UUID bossBarId, String title, float progress, String color)
         void updateBossBarTitle(Player player, UUID bossBarId, String title)
         void updateBossBarProgress(Player player, UUID bossBarId, float progress)
@@ -772,19 +1291,23 @@ module.exports = {
         EdEntity interface: es.edwardbelt.edlib.iapi.entity
         Integer getId(); UUID getUUID(); EntityType getType(); Object getEntity()
         void addWatcher(Player player); void removeWatcher(Player player); Collection<Player> getWatchers()
+          // ^ inside a mine use MineService#spawnInMine instead — it adds the watchers, spawns, tracks
+          //   the entity and applies the mob-entities toggle for you.
         void damageEffect(); void spawn(); void spawnForPlayer(Player player); void remove(); void removeForPlayer(Player player)
         void setGravity(boolean hasGravity); void setInFire(boolean inFire)
-        void setEquipment(EntityEquipmentSlot slot, ItemStack item)
+        void setEquipment(EntityEquipmentSlot slot, ItemStack item)  // inside a mine use MineService#setEntityEquipment so late viewers see it
         void playAnimation(EntityAnimation animation)
+        void setRightArmPose(float xDeg, float yDeg, float zDeg)  // ARMOR STANDS: the client never renders the swing animation on an armor stand, so fake a swing by snapping the arm pose and back (the held item follows the arm bone even with arms hidden). Vanilla defaults: right -10,0,-10 / left -15,0,10. Set before spawn() to ride the spawn metadata; after spawn it broadcasts a metadata update.
+        void setLeftArmPose(float xDeg, float yDeg, float zDeg)
         void setSlimeSize(int size); void setSmall(); void setInvisible()
         void setSheepColor(EdColor color)           // sheep wool colour
-        void setScale(float scale)                  // minecraft:scale attribute, 1 = normal (1.21.x+; no-op on 1.20.4)
+        void setScale(float scale)                  // minecraft:scale attribute, 1 = normal (1.21.x / 26.1+; no-op on 1.20.4)
         void setDinnerbone(boolean d); boolean isDinnerbone() // render upside down (living entities; while on, any display name is shown via a text-display passenger instead of the name tag)
         void setDisplayName(String name); void setGlowing(EdColor color) /* 16 vanilla chat colours only — see GLOWING WARNING */; float getNameHeight()
-        void setText(List<String> lines)            // text-display only: update lines in place (no flicker)
-        void setBillboard(BillboardMode mode)       // display entities (text/block/item): rotation constraint — call before spawn(); default CENTER (faces player)
-        // Display-entity styling — set BEFORE spawn() when possible (rides in the spawn metadata); calling
-        // after spawn also broadcasts a metadata update to watchers. All no-ops on non-display entities:
+        void setText(List<String> lines)            // TEXT DISPLAYS: update the lines in place via a metadata packet — no despawn/respawn, no flicker
+        void setBillboard(BillboardMode mode)       // displays: rotation constraint — call before spawn(); text displays default to CENTER (faces the player)
+        // Display-entity styling — set BEFORE spawn() when possible (it rides in the spawn metadata);
+        // calling after spawn also broadcasts a metadata update. All no-ops on non-display entities:
         void setBackground(int argb)                // text displays: ARGB background (0xAARRGGBB); 0 = fully transparent (vanilla default 0x40000000 semi-transparent black)
         void setShadowRadius(float radius)          // ground shadow in blocks; 0 = none (default)
         void setShadowStrength(float strength)      // 1 = default, higher = darker; needs shadowRadius > 0
@@ -804,6 +1327,8 @@ module.exports = {
         void setYawHead(float yaw); void setYaw(float yaw); void setPitch(float pitch)
         void rotateBody(float yaw, float pitch); void rotateHead(float yaw); Vector getLocVector()
         void setPassengers(List<EdEntity> passengers); void addPassenger(EdEntity passenger)
+        void addPassenger(Player player)            // mount a REAL player client-side: the mount packet is broadcast to this entity's watchers, so clients render (and the rider physically attaches to) the packet entity. Nothing changes server-side — safe for cosmetic/AFK rides. Add the player as a watcher and spawn() FIRST, or the client drops the packet.
+        void removePassenger(Player player)         // dismount a real player (removing the entity also dismounts)
         void resendPassengers(Player player)        // re-send the mount packet to ONE player: after showing an already-spawned vehicle + passengers to a new watcher (passengers last), call this or the passengers won't ride for them
         void addGoal(EdGoal goal); void startNextGoal(); void onGoalComplete()
         Queue<EdGoal> getGoalQueue(); EdGoal getCurrentGoal(); void setCurrentGoal(EdGoal goal)
@@ -811,11 +1336,15 @@ module.exports = {
         EdLivingEntity interface: es.edwardbelt.edlib.iapi.entity
         EdFallingBlock interface: Material getBlockMaterial(); void setFallingBlock(Material material)
         EdPrimedTNT interface: long getFuseTicks(); void setFuseTicks(long ticks); Material getMaterial(); void setMaterial(Material material)
-        EdNPC interface (extends EdEntity): es.edwardbelt.edlib.iapi.entity — a packet player NPC
-          String getProfileName(); void setSkin(String texture, String signature); void setSkinParts(byte);
-          void setSecondLayerVisible(boolean); boolean isTabListed(); void setTabListed(boolean); void setTabName(String);
+        EdNPC interface (extends EdEntity) — a packet player NPC:
+          String getProfileName(); void setSkin(String texture, String signature) (respawns for watchers);
+          void setSkinParts(byte parts) (0x7F = all); void setSecondLayerVisible(boolean);
+          boolean isTabListed(); void setTabListed(boolean); void setTabName(String) (null resets);
           boolean isNameTagVisible(); void setNameTagVisible(boolean); boolean isSneaking(); void setSneaking(boolean);
           void lookAt(double x, double y, double z); void lookAt(Vector target)
+          // NOTE: the name above the head is the game PROFILE name (16 chars max, legacy colour codes
+          // allowed) and is fixed at creation; setDisplayName() updates the TAB LIST name instead,
+          // because custom-name metadata isn't rendered for player entities.
         EntityHolder class: es.edwardbelt.edlib.iapi.entity — ctors (Entity) or (EdEntity); Vector getPosition()
         EdEntityVariantable interface (extends EdEntity): void setVariant(EntityVariant.Variant variant)
           // mob variants for packet entities (cast the EdEntity from createEntity for supported types).
@@ -826,19 +1355,41 @@ module.exports = {
           //   BLACK_AND_WHITE, GOLD, SALT_AND_PEPPER, KILLER_BUNNY), Salmon (SMALL, MEDIUM, LARGE),
           //   Fox (RED, SNOW), Llama (CREAMY, WHITE, BROWN, GRAY), Panda (DEFAULT, AGGRESSIVE, LAZY, WORRIED,
           //   PLAYFUL, WEAK, BROWN), Wolf (PALE, ASHEN, BLACK, CHESTNUT, RUSTY, SNOWY, SPOTTED, STRIPED, WOODS)
-          // static <T> EntityVariant.getVariant(EntityType type, String value) resolves a config string ("snow",
-          // "killer_bunny" uses the in-game value e.g. "evil") to the enum constant, null if unknown.
+          // static <T> EntityVariant.getVariant(EntityType type, String value) resolves a config string
+          // ("snow", "killer_bunny" uses the in-game value e.g. "evil") to the enum constant, null if unknown.
 
-        EdModel interface: es.edwardbelt.edlib.iapi.model
+        ModelEngine (Blockbench models as packet entities) — es.edwardbelt.edlib.iapi.entity
+        EdModelEngineEntity extends EdEntity — the model rides a ModelEngine Dummy (packet-only, no real
+        server entity), so watchers, goals, teleports and rotation all work exactly like any EdEntity and
+        nothing is persisted. Vanilla-only EdEntity members with no model equivalent (equipment, sheep
+        colour, slime size, display transformations, passengers) are safe no-ops.
+          String getModelId();
+          boolean isModelLoaded()     // true once the model finished initialising on the main thread after spawn() and hasn't been removed. ModelEngine silently drops animations queued before that — the entity buffers the idle animation for you, but wait for this before a one-shot.
+          void playAnimation(String animation)                     // one-shot, default lerp (0.2s), normal speed
+          void playAnimation(String animation, double lerpIn, double lerpOut, double speed, boolean loop)
+          void stopAnimation(String animation)                     // also how a looped animation ends
+          void setModelScale(double scale)                         // 1 = authored size; before or after spawn(). setScale(float) delegates here
+          // HITBOX/CLICKS: when the blueprint defines a main 'hitbox' bone, an invisible interaction
+          // hitbox of that size spawns and follows the model, and getId() returns the HITBOX entity id —
+          // the id CLICK_ENTITY packets carry — so PlaceableService#registerClickable works unchanged.
+          // Models without a hitbox bone are not clickable.
+        EdMythicMobInfo class (from EdLibAPI#getMythicMobInfo) — a read-only snapshot of a MythicMobs
+        definition, resolved WITHOUT spawning anything: String getEntityType(); String getDisplayName()
+        (null when it needs a live mob); double getHealth() (0 when it's an expression); String getModelId()
+        (the ModelEngine model from its model{} skill, or null). Typical use: if getModelId() is set render
+        it as an EdModelEngineEntity, otherwise spawn a packet entity of getEntityType() and apply the name.
+
+        EdModel interface (EdLib's own model format): es.edwardbelt.edlib.iapi.model
         String getId(); Float getMaxHeight(); EdModelEntity createEntity(Location location)
         EdModelEntity interface: EdEntity getInteractionEntity()/getMainEntity()/getDisplayName();
         Map<String,EdEntity> getPassengers(); EdModel getModel(); void setYaw(float)/setPitch(float)/rotate(float,float);
-        void spawn(); void setGlowing(EdColor) /* 16 vanilla chat colours only — see GLOWING WARNING */; void addWatcher(Player); void remove();
+        void spawn(); void setGlowing(EdColor) /* 16 vanilla chat colours only */; void addWatcher(Player); void remove();
         void playAnimation(String)/playLoopAnimation(String)/stopAnimation(); boolean isPlayingAnimation(); String getCurrentAnimation()
-        void setScale(float scale)                  // scales the whole model (parts + animation keyframes) around its anchor; works before/after spawn, safe mid-animation
+        void setScale(float scale)                  // scales the whole model (parts + animation keyframes) around its anchor; before/after spawn, safe mid-animation
         float getScale()
         void setTeleportDuration(int ticks)         // teleport interpolation on every display part — model moves glide (see EdEntity#setTeleportDuration)
         void setSmoothMovement(int interpolationTicks) // detaches parts from the anchor and drives them with interpolated teleports; enable BEFORE spawn(), then move with tp(...) — or syncParts() each tick when a goal drives the main entity
+        void setModelOffset(double x, double y, double z) // offsets the rendered model (anchor, parts, hitbox) relative to the logical tp position WITHOUT moving the floating name — re-centres models whose geometry origin sits off-centre. Blocks at scale 1; scales with setScale. Applies on the next teleport
         void tp(double x, double y, double z)       // teleport whole model (anchor, parts, name, hitbox), keeps rotation
         void tp(double x, double y, double z, float yaw, float pitch) // + rotate in the same packet; in smooth mode position AND rotation interpolate together (fluid banking turns)
         void syncParts()                            // snap every part to the main entity's position — call each tick when a goal moves the main entity in smooth mode
@@ -847,34 +1398,38 @@ module.exports = {
         EdGoal abstract class — void start()/init()/forceStop(); boolean isRunning()/shouldExecute(); void tick();
           void setEndRunnable(Runnable); void setStartRunnable(Runnable); void setEachTickRunnable(Runnable);
           EdEntity getEntity(); void setEntity(EdEntity); boolean isForceStopped()
+          // The goal ticks on an EdLib ASYNC repeating task (1 tick period). endRunnable fires when
+          // shouldExecute() turns false — but NOT when the goal was forceStop()ed, which is exactly why
+          // every animation also needs the asyncLater fail-safe despawn (rule 9).
         Goal impls (es.edwardbelt.edlib.iapi.entity.goal.impl):
-        EdGoalMove(Vector moveGoal, double speed) — straight-line move; setAffectY/setSendRotationEachTick/setInvertRotation/setSendRotation
+        EdGoalMove(Vector moveGoal, double speed) — straight-line move (speed = blocks per tick); setAffectY/setSendRotationEachTick/setInvertRotation/setSendRotation
         EdGoalArchMove(Vector end, double speed, long duration)
-        EdGoalParabolicMove(Vector end, double height, long duration)
+        EdGoalParabolicMove(Vector end, double height, long duration) — teleports each tick
         EdGoalDisplayParabolicMove(Vector end, double height, long duration, int keyframeTicks, Matrix4f baseTransform)
-          // parabolic flight for DISPLAY entities with client-side interpolation: instead of teleporting each
-          // tick (EdGoalParabolicMove, can look choppy) the transformation translation is keyframed every
-          // keyframeTicks and the client glides between keyframes — perfectly smooth. baseTransform = the
-          // display's standing transformation (scale/centering; null = identity); each keyframe sends
-          // translate(arcOffset) * baseTransform. The underlying entity never moves — use getVisualPosition()
-          // for where viewers see it (particle trails). Goal ends after the final glide, then endRunnable fires.
+          // parabolic flight for DISPLAY entities with client-side interpolation: instead of teleporting
+          // each tick (EdGoalParabolicMove, can look choppy) the transformation translation is keyframed
+          // every keyframeTicks and the client glides between keyframes — perfectly smooth. baseTransform
+          // = the display's standing transformation (scale/centering; null = identity); each keyframe
+          // sends translate(arcOffset) * baseTransform. The underlying entity never moves — use
+          // getVisualPosition() for where viewers see it (particle trails). 2-4 keyframeTicks is smooth.
         EdGoalOrbit(Vector center, double radius, double angularSpeed, boolean clockwise, int ticksDuration) — getCenterPoint/getRadius/isClockwise/getCurrentAngle/setAffectY/...
         EdGoalFollowEntity(EntityHolder target, double followDistance, double speed, long duration) // huge duration = "infinite"
-        EdGoalDelay(int delayTicks) — getProgress/getRemainingTicks/getRemainingSeconds (use to pause a goal chain)
-        You can also write your own goal: extend EdGoal, override shouldExecute()/tick(), and move with EdEntity#shortTp.
+        EdGoalDelay(int delayTicks) — getProgress/getRemainingTicks/getRemainingSeconds (pause a goal chain)
+        Queue several goals on one entity with addGoal(...) — they run in order, each one's endRunnable
+        firing before the next starts. You can also write your own: extend EdGoal, override
+        shouldExecute()/tick(), and move with EdEntity#shortTp.
 
-        SCHEDULING (es.edwardbelt.edlib.iapi.task) — EdLib's own scheduler, fine for packet work:
+        SCHEDULING (es.edwardbelt.edlib.iapi.task) — EdLib's own scheduler, the right one for packet work:
         TaskExecutor executor = EdLibAPI.getExecutor();
         EdTask async(Runnable task, String name)                         // run off the main thread now
         EdTask asyncLater(Runnable task, long delayTicks, String name)   // run off-thread after a delay
         EdTask repeatedAsync(Runnable task, double delayTicks, double periodTicks, String name) // async repeating
-        EdTask sync(Runnable task, String name)                          // hop to the MAIN thread (for Bukkit world/entities)
+        EdTask sync(Runnable task, String name)                          // hop to the MAIN thread (only for Bukkit world/entities/inventories)
         EdTask syncLater(Runnable task, long delayTicks, String name)
         EdTask: void cancel(); boolean isCancelled(); int getTaskId()
-        Use async/asyncLater for packet effects and timers; use sync only when you must touch the real
-        Bukkit world/entities/inventory. For timed entity sequences prefer goal runnables (setEndRunnable
-        / setEachTickRunnable) or EdGoalDelay over manual timers. A common fail-safe: schedule an
-        asyncLater that despawnInMines the entity in case the player leaves mid-animation.
+        Use async/asyncLater for every packet effect and timer; use sync ONLY when you must touch the
+        real Bukkit world/entities/inventory. For timed entity sequences prefer goal runnables
+        (setEachTickRunnable / setEndRunnable) or EdGoalDelay over manual timers.
 
         PACKET WORLDS (es.edwardbelt.edlib.iapi.world) — in-memory "fake" worlds streamed to players:
         EdWorld (from EdLibAPI#createWorld()):
@@ -902,46 +1457,61 @@ module.exports = {
           dye/extended colours that are NOT valid team colours — passing one to setGlowing throws a
           ClientboundSetPlayerTeamPacket NullPointerException during packet encode and DISCONNECTS the
           player ("Cannot invoke Enum.ordinal() because instance is null"). Never use them for glow.
-        BillboardMode (es.edwardbelt.edlib.iapi.entity): FIXED, VERTICAL, HORIZONTAL, CENTER — for entity.setBillboard(...) on display entities. CENTER = always faces the player (hologram look); FIXED = static.
+          (setSheepColor accepts all 25 — the restriction is glowing only.)
+        BillboardMode (es.edwardbelt.edlib.iapi.entity): FIXED, VERTICAL, HORIZONTAL, CENTER — for
+          entity.setBillboard(...) on display entities. CENTER = always faces the player (hologram look);
+          FIXED = static; VERTICAL/HORIZONTAL rotate around one axis only.
         EntityAnimation (es.edwardbelt.edlib.iapi.entity): SWING_MAIN_HAND(0), SWING_OFF_HAND(3), LEAVE_BED(1), CRITICAL_EFFECT(4), MAGIC_CRITICAL_EFFECT(5)
         EntityEquipmentSlot (es.edwardbelt.edlib.iapi.entity): MAIN_HAND(0), OFF_HAND(1), BOOTS(2), LEGGINGS(3), CHESTPLATE(4), HELMET(5), BODY(6), SADDLE(7)
 
         ============================================================================
-        BEST PRACTICES (read before writing an enchant)
+        BEST PRACTICES (checklist before you ship an enchant)
         ============================================================================
-        - Prefer asyncSafe() = true for mine enchants and keep onProc packet/data only (MineService
-          breaks, EdLib entities, currency changes, per-player particles/sounds). Return false only if
-          you must touch the real Bukkit world/entities/inventories.
-        - Break + reward ONLY through MineService (breakBlocks/breakLayer/breakSphere/breakBlock). Never
-          touch the real world — mines have no real blocks. Default affectBlockCurrencies to false,
-          affectAutosell + affectTokenGreed to true unless told otherwise.
-        - Show packet entities with mines.spawnInMine(player, entity) (NOT addWatcher+spawn) and remove
-          them with mines.despawnInMine(player, entity) (NOT entity.remove()). They auto-despawn when a
-          player leaves the mine.
-        - Particles/sounds are PER PLAYER: send them only to the digger (or to mines.getMineViewers(player)
-          to show the whole mine), and ALWAYS gate them on enchants.isParticlesDisabled / isSoundsDisabled,
-          and chat on isMessagesDisabled / isProcMessageDisabled. The more (gated) particle FX, the better.
-        - Move packet entities through goals (EdGoalMove/Orbit/Parabolic/Arch/Follow) or a custom EdGoal
-          using EdEntity#shortTp. Time sequences with the goal's setEachTickRunnable/setEndRunnable.
-        - Center block positions with +0.5 when spawning entities or playing FX (block coords -> block center).
-        - Scale the effect with the enchant level via enchants.getLevel(uuid, id).
-        - NEVER hardcode tunables. Put a reward amount, radius, speed, currency id, durations, etc. in
-          the enchant's settings: block and read them with enchants.getSettings(id). Read inside onProc
-          (or refresh on reload) so /pinna reload picks up changes.
-        - ALWAYS give the enchant a configurable proc-message in its yaml and send it with
-          enchants.sendProcMessage(player, id, "{token}", value, ...) — it already respects the
-          player's mute toggles, colours and PlaceholderAPI. Don't build chat by hand.
-        - GLOWING: only call setGlowing(EdColor) with one of the 16 vanilla chat colours (BLACK,
-          DARK_BLUE, DARK_GREEN, DARK_AQUA, DARK_RED, DARK_PURPLE, GOLD, GRAY, DARK_GRAY, BLUE, GREEN,
-          AQUA, RED, LIGHT_PURPLE, YELLOW, WHITE). The extended EdColor values (ORANGE, MAGENTA,
-          LIGHT_BLUE, LIME, PINK, LIGHT_GRAY, CYAN, PURPLE, BROWN) CRASH the player's connection with a
-          ClientboundSetPlayerTeamPacket NPE. When in doubt, pick a standard colour like AQUA or RED.
-        - SPAWN THREAD: every EdLib packet entity can be created and spawned ASYNCHRONOUSLY (in
-          asyncSafe onProc, goal runnables or executor.async) — falling blocks, armor stands, slimes,
-          zombies, displays, NPCs, TNT, etc. The ONLY exception is the ENDER DRAGON: it must be created
-          and spawned on the MAIN thread. If you spawn an Ender Dragon, do the createEntity + spawnInMine
-          inside EdLibAPI.getExecutor().sync(...), then animate/move it off-thread as usual. Everything
-          else stays fully async.
+        - asyncSafe() returns TRUE and onProc stays packet/data only (MineService breaks, EdLib
+          entities, currency changes, per-player particles/sounds). Return false only if you truly
+          must touch the real Bukkit world/entities/inventories.
+        - Break + reward ONLY through MineService (breakBlocks/breakLayer/breakSphere/breakBlock).
+          Never touch the real world — mines have no real blocks. Default affectBlockCurrencies to
+          false and affectAutosell + affectTokenGreed to true unless told otherwise, and expose all
+          three as settings: flags.
+        - Show packet entities with mines.spawnInMine(player, entity) and remove them with
+          mines.despawnInMine(player, entity). Never addWatcher+spawn, never entity.remove().
+          Use the (player, entity, false) overload only for something that is genuinely part of the
+          mine rather than an enchant animation.
+        - Dress mine entities with mines.setEntityEquipment(...), not entity.setEquipment(...), so
+          viewers who arrive mid-animation see the gear.
+        - Particles/sounds are PER PLAYER packets: send them to mines.getMineViewers(player) and gate
+          each viewer on isParticlesDisabled / isSoundsDisabled. Route them through an Fx helper so a
+          toggle can never be forgotten. The more (gated) particle FX, the better.
+        - Chat only through enchants.sendProcMessage(player, id, "{token}", value, ...) — it already
+          respects both mute toggles, colours and PlaceholderAPI. Never build proc chat by hand.
+        - If you disguised blocks, ALWAYS mines.revealBlocks(...) when the animation ends — under
+          Virtual Block Breaking nothing else will clear them.
+        - Move packet entities through goals (EdGoalMove/Orbit/Parabolic/Arch/Follow/Delay) or a
+          custom EdGoal using EdEntity#shortTp. Time sequences with setEachTickRunnable/setEndRunnable
+          rather than manual timers.
+        - Every spawned entity gets BOTH an endRunnable despawn and an asyncLater fail-safe despawn,
+          in case the player leaves the mine or logs out mid-animation.
+        - Centre block positions with +0.5 when spawning entities or playing FX (block coords ->
+          block centre).
+        - Scale the effect with the enchant level via enchants.getLevel(uuid, id) — and put the
+          per-level factor in settings:, not in code.
+        - NEVER hardcode a tunable. Reward amounts, radius, speed, currency ids, durations, entity
+          types, block materials, colours: all in the enchant's settings: block, read with
+          enchants.getSettings(id) INSIDE onProc so /pinna reload picks up changes.
+        - GLOWING: only call setGlowing(EdColor) with one of the 16 vanilla chat colours. The 9
+          extended EdColor values CRASH the viewer's connection. When in doubt use AQUA or RED.
+        - SPAWN THREAD: every EdLib packet entity can be created and spawned ASYNCHRONOUSLY (in an
+          asyncSafe onProc, a goal runnable or executor.async) — falling blocks, armor stands, slimes,
+          zombies, displays, NPCs, TNT, ModelEngine models, everything. The ONLY exception is the
+          ENDER DRAGON: its constructor fires a Bukkit phase event Paper requires to be synchronous,
+          so do createEntity + spawnInMine inside EdLibAPI.getExecutor().sync(...), then animate and
+          move it off-thread as usual.
+        - PARTICLE ENUM NAMES DIFFER BY VERSION. Use the names of the paper-api you compile against:
+          1.20.4 has REDSTONE / BLOCK_CRACK / EXPLOSION_LARGE / SMOKE_LARGE, 1.21+ renamed them to
+          DUST / BLOCK / EXPLOSION_EMITTER / LARGE_SMOKE. The examples here use the 1.20.4 names.
+        - Cooldowns belong in the config: set cooldown-ticks in the enchant yaml instead of writing
+          your own rate limiter — it is applied before onProc is ever called.
 
         ============================================================================
         HOW TO ADD THE ENCHANT (tell the user this AFTER you write the Java)
@@ -950,30 +1520,47 @@ module.exports = {
         Tell the user to create both, then run /pinna reload (or restart):
 
         1) The enchant config — plugins/PinnaPrison/enchants/<id>.yml  (the <id> MUST match your
-           registerEnchant id). This makes the enchant exist, buyable and proc a chance:
+           registerEnchant id). This is what makes the enchant exist, buyable and able to proc:
         \`\`\`yaml
+        enabled: true          # false = the enchant is never registered (how you trim the list)
         color:
-          primary: '&4'      # used by {prim-color} in name/lore
-          secondary: '&c'    # used by {sec-color}
+          primary: '&4'        # used by {prim-color} in name/lore
+          secondary: '&c'      # used by {sec-color}
         starting-level: 0
-        max-chance: 5        # max proc chance % (reached at max level)
-        max-level: 1000
+        max-chance: 5          # max proc chance % (reached at max level)
+        # always-max-chance: true   # every level procs at max-chance (a "procs every block" enchant)
+        max-level: 1000        # 0 = UNLIMITED (never maxes out) — then use chance-per-level below
+        # chance-per-level: 0.01    # +0.01% per level instead of spreading max-chance over max-level;
+                                    # required for an unlimited enchant, capped at max-chance (or 100%)
+        # proc-blocks: 25000        # DETERMINISTIC alternative to a chance: one activation per N blocks
+                                    # mined, scaling with the level (level 2 = every 12,500). The nice way
+                                    # to configure very rare enchants; boosters/crystals/prestige still
+                                    # shorten the interval. 0 = use the normal chance system.
         material: NETHERITE_PICKAXE   # icon material (a Bukkit Material)
-        type: 'api'          # ALWAYS 'api' for a registered APIEnchant
+        model-data: -1         # custom model data of the icon, for resource packs (-1 = none)
+        type: 'api'            # ALWAYS 'api' for a registered APIEnchant
         display-name: 'Explosion'
+        cooldown-ticks: 100    # minimum ticks between procs (0 = none) — use this instead of your own limiter
+        refundable: true       # can players refund levels (enchants.refund-return-percent)?
         # ALWAYS include a proc-message so it is configurable. Send it from onProc with
         # enchants.sendProcMessage(player, "<id>", "{placeholder}", value, ...). Players can mute it
         # globally (/settings) or per-enchant (upgrade menu) and sendProcMessage respects that.
         # Supports colour codes, PlaceholderAPI and %pinnaprison_notation_<number>%.
         proc-message: '&c&lBOOM! &7Explosion blasted &a{blocks} &7blocks!'
-        requirement:         # optional: gate buying it behind a leveling/currency
+        requirement:           # optional: gate buying it behind a leveling/currency
           economy: 'pickaxelevel'
           amount: 10
+        # chain: tokengreed    # optional COMBO: this enchant stops proccing on block breaks and instead
+                               # rolls its chance every time 'tokengreed' procs (also accepts
+                               # chain: { enchant: tokengreed }). Your Java needs no changes.
+        reward:                # optional bonus currency per block this enchant sweeps
+          type: blocks         # 'blocks' (default) = only the normal block income; or a currency id
+          per-block: '0'       # math + PlaceholderAPI + {level} aware
         # The settings: block holds YOUR enchant's custom config. Read it in onProc with
-        # enchants.getSettings("<id>").getString/getDouble/getInt/getBoolean. Put anything here:
-        # a reward currency + amount, an animation radius/speed, affect-* flags, etc.
+        # enchants.getSettings("<id>").getString/getDouble/getInt/getBoolean/getLong. Put anything here.
         settings:
           radius: 3
+          radius-per-level: 0.001
           affect-autosell: true
           affect-tokengreed: true
           affect-block-currencies: false
@@ -981,17 +1568,22 @@ module.exports = {
           currency: tokens
           starting-cost: 100
           increase-cost-by: 500
-        prestige:            # optional: remove this whole block for no prestige
+          # is-exponential: true      # exponential cost curve instead of linear
+          # exponential-growth: 1.05
+        prestige:              # optional: remove this whole block for no prestige
           enabled: true
           max-prestige: 5
           max-chance-per-prestige: 1   # +1% max chance per prestige
+          # amount-scalar:             # for enchants that already proc every block, prestige pays out
+          #   start: 0.2               # in the AMOUNT instead: +0.2x at prestige 1 ...
+          #   increase-per-prestige: 0.2
           reset-level: true
           requirements:
             tokens:
               type: currency
               amount: 500000
               remove: true
-              scale-with-prestige: true
+              increase-cost-by: 500000   # cost added per prestige already earned
         \`\`\`
 
         2) A GUI item so players can see/buy/upgrade it — add an entry under items: in
@@ -1004,6 +1596,7 @@ module.exports = {
               enchant: 'explosion'            # your enchant id
               upgrade-gui: 'upgrade-enchant'  # opens the buy/upgrade menu on click
             material: '{material}'            # uses the enchant's configured material
+            custom-model-data: '{model-data}' # uses the enchant's configured model-data
             slot: 12
             name: '&c&lExplosion &b&lEnchant %pinnaprison_enchant_prestige_stars_explosion%'
             lore:
@@ -1016,10 +1609,13 @@ module.exports = {
               - '&r'
               - '{status}'      # CLICK TO UPGRADE / MAXED / locked, filled in automatically
         \`\`\`
-        GUI item placeholders filled by the 'enchant' custom item: {material}, {level}, {max-level},
-        {cost}, {chance}, {status}. Anywhere you can also use PlaceholderAPI:
+        GUI item placeholders filled by the 'enchant' custom item: {material}, {model-data}, {level},
+        {max-level}, {cost}, {chance}, {status}. Anywhere you can also use PlaceholderAPI:
         %pinnaprison_enchant_level_<id>%, %pinnaprison_enchant_chance_<id>%,
-        %pinnaprison_enchant_prestige_stars_<id>%, %pinnaprison_notation_<number>%.
+        %pinnaprison_enchant_chance_onein_<id>%, %pinnaprison_enchant_prestige_stars_<id>%,
+        %pinnaprison_enchant_activations_<id>%, %pinnaprison_notation_<number>%,
+        %pinnaprison_variable_<name>%, %pinnaprison_currency_balance_<id>%,
+        %pinnaprison_boosters_names_<economy>%, %pinnaprison_mine_...%.
 
         Final message to the user (after creating an enchant):
         "I created the <Name> enchant. To install it:
