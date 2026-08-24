@@ -371,6 +371,39 @@ module.exports = {
         void setAutosell(UUID playerId, boolean enabled)
         boolean hasPrice(Material material)
         Map<String, BigDecimal> sell(UUID playerId, Material material, BigDecimal amount) // returns per-currency gains (boosters + visitor tax applied)
+        void addSummary(UUID playerId, String economyId, BigDecimal amount)     // count a payout YOU made in the reward summary
+        void removeSummary(UUID playerId, String economyId, BigDecimal amount)  // take it back (refund / rolled-back payout)
+
+        REWARD SUMMARY — making your own payouts show up
+        Selling, per-block currencies and the config \`give-eco\` action all feed the periodic "Reward
+        Summary" message, the income rate and the session totals. When YOUR addon pays a player
+        directly (an API enchant reward, a custom drop) none of that happens, so the summary reports
+        less than the player actually earned. \`addSummary\` closes that gap:
+        \`\`\`java
+        SellService sell = PinnaPrisonAPI.getInstance().getSell();
+
+        // 1. pay the player           2. count it
+        api.getCurrencies().addBalanceBoosted(uuid, "tokens", amount);
+        sell.addSummary(uuid, "tokens", amount);
+        \`\`\`
+        RULES:
+        - addSummary ONLY COUNTS — it never pays. Credit the balance yourself (CurrencyService or your
+          own economy) as well, or the summary reports income nobody received.
+        - Count what the player RECEIVED, not what you configured. \`addBalanceBoosted\` returns the
+          boosted figure — pass that one, or the summary under-reports by exactly the boost.
+        - The economy id is NOT VALIDATED. A PinnaPrison currency, a leveling id, or an id of your own
+          that PinnaPrison knows nothing about ("souls") are all accepted and accumulate under that key.
+        - Read it back anywhere placeholders work: %pinnaprison_summary_<id>%, plus
+          %pinnaprison_summary_rate_<id>% (last 60s) and %pinnaprison_summary_gained_<id>% (session).
+        - A key with NO LINE in \`summary.message\` (autosell.yml) accumulates but is never shown. Tell
+          the server owner to add one, and to test the RAW placeholder in the condition — "1.5K" from a
+          _formatted placeholder is not a number, so the line would silently drop every time:
+            - '[if %pinnaprison_summary_souls% > 0] &d&l+ %pinnaprison_summary_souls_formatted% &5Souls'
+        - removeSummary floors the running + session totals at zero and drops a total that reaches zero
+          (so its [if ... > 0] line hides itself again). It deliberately leaves the rolling RATE alone:
+          that measures gains over a past window a later correction cannot un-happen.
+        - Both ignore non-positive amounts and are safe to call from any thread (so straight off an
+          async proc thread — no sync hop).
 
         ----------------------------------------------------------------------------
         BoosterService  (personal + global currency-income / enchant-chance multipliers)
@@ -1156,18 +1189,24 @@ module.exports = {
                         () -> mines.despawnInMine(player, comet), failSafe, "comet-cleanup");
             }
 
-            /** A short-lived floating text display. Displays are NEVER hidden by the mob-entities toggle. */
+            /**
+             * A short-lived floating text display. Displays are NEVER hidden by the mob-entities toggle.
+             *
+             * NOTE the factory: createTextDisplay, NOT createEntity(EntityType.TEXT_DISPLAY, ...).
+             * createEntity cannot build ANY of the three display types and throws
+             * "TEXT_DISPLAY is not a supported entity" if you try.
+             */
             private void floatingText(Player player, World world, Vector pos, String text, long ticks) {
                 MineService mines = PinnaPrisonAPI.getInstance().getMines();
-                EdEntity display = EdLibAPI.getInstance().createEntity(EntityType.TEXT_DISPLAY,
-                        new Location(world, pos.getX(), pos.getY(), pos.getZ()));
+                EdEntity display = EdLibAPI.getInstance().createTextDisplay(
+                        new Location(world, pos.getX(), pos.getY(), pos.getZ()), List.of(text));
                 if (display == null) return;
                 display.setBillboard(BillboardMode.CENTER);   // always faces the viewer — call BEFORE spawn
                 display.setBackground(0);                     // fully transparent background
                 display.setTextShadow(true);
                 display.setSeeThrough(false);
                 display.setTeleportDuration(3);               // any tp glides instead of snapping
-                display.setText(List.of(text));
+                // The text came from the factory — setText(...) is for CHANGING it on a live display.
                 // enchantMob=false: a text display is not a "mob", and this keeps the intent explicit.
                 mines.spawnInMine(player, display, false);
                 EdLibAPI.getExecutor().asyncLater(
@@ -1263,14 +1302,28 @@ module.exports = {
                 TaskExecutor getExecutor(), void setExecutor(TaskExecutor)  // scheduler (see SCHEDULING)
         Instance:
         EdModel getModel(String modelId)
-        EdEntity createEntity(EntityType type, Location location)   // ANY entity type, incl. TEXT_DISPLAY / BLOCK_DISPLAY / ITEM_DISPLAY; cast to EdFallingBlock / EdPrimedTNT / EdEntityVariantable where relevant. Returns null if the type can't be built.
+        EdEntity createEntity(EntityType type, Location location)   // MOBS + projectiles + FALLING_BLOCK / TNT / ARMOR_STAND / INTERACTION / MARKER; cast to EdFallingBlock / EdPrimedTNT / EdEntityVariantable where relevant.
+          // ^ NOT for displays. createEntity only knows entity types that have a spawnable constructor,
+          //   and THROWS "TEXT_DISPLAY is not a supported entity. Supported entities: [...]" for the
+          //   three display types. Each display has its OWN factory below — always use those:
+          //     TEXT_DISPLAY  -> createTextDisplay(location, lines)
+          //     BLOCK_DISPLAY -> createBlockDisplay(location, matrix, material)
+          //     ITEM_DISPLAY  -> createItemDisplay(location, matrix, texture, uuidArray, name)
+        EdEntity createTextDisplay(Location location, List<String> lines)  // a floating text / hologram, one entry per line
+          // ^ THE only way to make a text display. Goes through EdLib's internal NMS text-display
+          //   builder, so it works on every supported server version. Legacy colour codes are parsed,
+          //   hex included (a raw literal component would degrade a hex colour to its last valid code).
+          //   Style it with the EdEntity display setters BEFORE spawn(), and change the text later
+          //   with setText(List<String>) — a metadata packet, no despawn/respawn, no flicker.
         EdNPC createNPC(Location location, String name, String skinTexture, String skinSignature) // packet player NPC (profile name capped at 16 chars)
         EdEntity createInteractionEntity(Location location, float height, float width) // note: height BEFORE width
         EdEntity createBlockDisplay(Location location, Matrix4f transformation, Material material)
         EdEntity createItemDisplay(Location location, Matrix4f transformation, String skinTexture, int[] profileUuid, String profileName)
           // ^ this overload builds an item display holding a CUSTOM PLAYER HEAD: skinTexture is the
           //   base64 "textures" value, profileUuid an int[4] uuid, profileName the profile name.
-          //   For a normal item, spawn createEntity(EntityType.ITEM_DISPLAY, loc) instead.
+        EdEntity createItemDisplay(Location location, Matrix4f transformation, ItemStack item)
+          // ^ for a NORMAL item. Never createEntity(EntityType.ITEM_DISPLAY, loc) — that throws
+          //   "ITEM_DISPLAY is not a supported entity" exactly like TEXT_DISPLAY does.
         EdWorld createWorld()
         // --- optional-plugin integrations (all safe to call blindly; they report "not installed") ---
         boolean isModelEngineEnabled()
