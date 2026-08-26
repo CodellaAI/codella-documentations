@@ -450,8 +450,41 @@ module.exports = {
         void apply(Player player, ItemStack crystalItem)        // rolls the apply chance
         void apply(Player player, ItemStack crystalItem, boolean skipRoll) // skipRoll=true always applies (slot + duplicate-boost checks still run); one crystal consumed either way
         List<AppliedCrystal> getAppliedCrystals(UUID playerId)
+        List<String> getCrystalIds()                            // every crystal configured in crystals.yml (items)
+        CrystalType getCrystalType(String id)                   // what it boosts + the ranges it rolls in, or null
+        ItemStack createCrystalItem(String id, Integer chance, Integer multiplier) // exact values; null on either = roll it from config
+        ItemStack createCrystalItemForBoost(String boost, int chance, int multiplier) // by boost key instead of crystal id
+        ItemStack createRandomCrystalItem(Collection<String> ids, int minChance, int maxChance, int minMultiplier, int maxMultiplier)
+        ItemStack createRandomCrystalItem(int minChance, int maxChance, int minMultiplier, int maxMultiplier)  // every configured crystal
+        boolean storeCrystal(Player player, ItemStack crystalItem) // into the crystal MENU instead of the hand; false if full/filtered
+        CrystalType record (iapi.data):    (String id, String boost, int minChance, int maxChance, int minMultiplier, int maxMultiplier)
         CrystalInfo record (iapi.data):    (String id, int multiplier, int chance)   // 25 = +25%
         AppliedCrystal record (iapi.data): (UUID uuid, String id, int multiplier)    // uuid = removable instance id
+
+        // ---- TIERED CRYSTAL BOXES / CRATES (choose the values yourself) ----
+        // createCrystalItem(id) rolls the crystal's OWN configured ranges. To decide the values
+        // (a T1 box that rolls low, a T5 box that rolls high) pass them in. Bounds are inclusive,
+        // and a max <= its min is a fixed value. The result is a normal crystal item — the player
+        // applies, stores, fuses and dusts it like any other.
+        \`\`\`java
+        CrystalService crystals = PinnaPrisonAPI.getInstance().getCrystals();
+
+        // one random crystal, chance 40-60%, boost +5% to +15%
+        ItemStack t1 = crystals.createRandomCrystalItem(40, 60, 5, 15);
+
+        // ...restricted to enchant crystals only (boost() is a currency id, an enchant id or "all-enchants")
+        Set<String> enchantIds = PinnaPrisonAPI.getInstance().getEnchants().getEnchantIds();
+        List<String> enchantCrystals = crystals.getCrystalIds().stream()
+                .filter(id -> enchantIds.contains(crystals.getCrystalType(id).boost()))
+                .toList();
+        ItemStack t5 = crystals.createRandomCrystalItem(enchantCrystals, 90, 100, 40, 60);
+
+        // exact values on one configured crystal (null on either = roll that one as configured)
+        ItemStack fixed = crystals.createCrystalItem("token_crystal", 100, 25);
+
+        player.getInventory().addItem(t1);   // or hand it straight to the crystal menu:
+        crystals.storeCrystal(player, t5);   // false when the storage is full or the boost is filtered
+        \`\`\`
 
         ----------------------------------------------------------------------------
         RebirthService
