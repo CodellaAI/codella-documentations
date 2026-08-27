@@ -1,6 +1,6 @@
 module.exports = {
     name: 'PinnaPrison',
-    description: 'API to access PinnaPrison features: packet-based private mines, pickaxe enchants (custom API enchants with chaining), currencies (incl. external-plugin currencies), levelings, rebirth, backpacks (upgrades + attachments), autosell, boosters (incl. live boost providers), crystals, abilities, attributes, autominers, bombs, drills, mine powerups, gangs, pickaxe skins, pickaxe NBT persistence, variables, custom mine placeables, config-driven GUIs, action-bar control, number formatting and offline player data — plus the low-level EdLib API for packet-based fake entities, display styling, ModelEngine/MythicMobs models, mob variants, packet worlds and goal-based AI used to build crazy animated mine enchants.',
+    description: 'API to access PinnaPrison features: packet-based private mines, pickaxe enchants (custom API enchants with chaining), currencies (incl. external-plugin currencies), levelings, rebirth, backpacks (upgrades + attachments), autosell, boosters (incl. live boost providers), crystals, abilities, attributes, autominers, robots, bombs, drills, mine powerups, gangs, pickaxe skins, pickaxe NBT persistence, variables, custom mine placeables, config-driven GUIs, action-bar control, number formatting and offline player data — plus the low-level EdLib API for packet-based fake entities, display styling, ModelEngine/MythicMobs models, mob variants, packet worlds and goal-based AI used to build crazy animated mine enchants.',
     pluginId: 'PinnaPrison',
     systemDownloadURL: `
         https://raw.githubusercontent.com/CodellaAI/codella-documentations/main/lib/PinnaPrison-API.jar
@@ -154,6 +154,7 @@ module.exports = {
         AttributeService getAttributes()
         AbilityService getAbilities()
         AutominerService getAutominers()
+        RobotService getRobots()            // deployable currency-farming robots
         SellService getSell()
         BombService getBombs()
         DrillService getDrills()
@@ -543,6 +544,47 @@ module.exports = {
         boolean isSummoned(UUID playerId, String minerId)
         void summon(Player player, String minerId)
         void despawn(Player player, String minerId)
+
+        ----------------------------------------------------------------------------
+        RobotService  (Robots: deployable head items a player right-clicks to add to their /robots
+        menu, where each one generates currency every second — robots.yml)
+        ----------------------------------------------------------------------------
+        No scheduler runs: what a robot has banked is derived from its last collection and its
+        per-second generation at its current level, so getPending() is always live.
+        boolean isEnabled()
+        Set<String> getTypeIds()                                // configured robot type ids
+        RobotTypeInfo getType(String typeId)                    // null when the id isn't configured
+        ItemStack createRobotItem(String typeId)                // the NBT-tagged /robots give item; null when the type has none
+        boolean isRobotItem(ItemStack item)
+        String getRobotType(ItemStack item)                     // null when it isn't a robot item
+        List<RobotView> getRobots(UUID playerId)                // works for offline players
+        RobotView getRobot(UUID playerId, String instanceId)
+        int getRobotCount(UUID playerId)
+        void deploy(Player player, String typeId, int amount)   // straight into their menu, no item involved
+        boolean remove(UUID playerId, String instanceId)
+        Map<String, BigDecimal> getTotalPending(UUID playerId)  // summed per currency across every robot
+        Map<String, BigDecimal> collectAll(Player player)       // returns what was paid. MAIN THREAD
+        RobotTypeInfo (es.edwardbelt.pinnaprison.iapi.robot) — a snapshot of one robots.yml entry:
+          String getId(); String getName();
+          int getStartingLevel(); int getMaxLevel();
+          long getMaxStorageSeconds()      // seconds of generation banked while away; 0 = unlimited
+          Set<String> getGeneratedCurrencies()
+          Map<String, BigDecimal> getGenerationPerSecond(int level)  // formulas evaluated at that level
+          String getUpgradeCurrency()      // null when the type has no upgrade cost
+          BigDecimal getUpgradeCost(int level)                       // cost of level -> level+1; ZERO when maxed/free
+        RobotView (es.edwardbelt.pinnaprison.iapi.robot) — one owned robot. Reads work offline;
+        collect/upgrade move currency and are MAIN THREAD only:
+          String getInstanceId(); String getTypeId(); RobotTypeInfo getType(); UUID getOwner()
+          int getLevel(); long getLastCollected(); boolean isMaxLevel()
+          Map<String, BigDecimal> getGenerationPerSecond()   // at its current level
+          Map<String, BigDecimal> getPending()               // banked so far, capped by max-storage-seconds, floored
+          BigDecimal getUpgradeCost(); String getUpgradeCurrency()
+          Map<String, BigDecimal> collect()                  // pays the owner + resets the timer; empty when nothing pending or owner offline
+          RobotUpgradeResult upgrade()                       // OK / MAXED / CANNOT_AFFORD / MISSING / OFFLINE
+          boolean setLevel(int level)                        // admin-style, charges nothing, clamped to max level
+          boolean remove()
+        Upgrading (and setLevel) settles the robot's pending currency at the OLD rate first, so a
+        level-up never re-prices what was already banked.
 
         ----------------------------------------------------------------------------
         BombService / DrillService
